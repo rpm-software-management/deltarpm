@@ -1,0 +1,9 @@
+*.o
+*.a
+applydeltaiso
+applydeltarpm
+combinedeltarpm
+fragiso
+makedeltaiso
+makedeltarpm
+rpmdumpheader
