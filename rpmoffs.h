@@ -5,6 +5,7 @@ struct rpmpay {
   unsigned int lx;
   off64_t o;
   unsigned int l;
+  int level;
 };
 
 int rpmoffs(FILE *fp, char *isoname, struct rpmpay **retp);

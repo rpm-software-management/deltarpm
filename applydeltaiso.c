@@ -10,9 +10,11 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdint.h>
 
 #include <zlib.h>
 #include <bzlib.h>
+#include <lzma.h>
 
 #include "util.h"
 #include "md5.h"
@@ -73,18 +75,6 @@ filloutdata(FILE *fpold, unsigned char *data, unsigned int *nmp, int nmpn)
 
 void applydelta(FILE *fpold, struct cfile *ocf, struct cfile *cf, unsigned char *outdata, unsigned int outlen, unsigned int *nmp, int nmpn);
 
-char *
-comp2str(int comp)
-{
-  if (comp == CFILE_COMP_UN)
-    return "uncomp.";
-  if (comp == CFILE_COMP_GZ)
-    return "gzip";
-  if (comp == CFILE_COMP_BZ)
-    return "bzip";
-  return "???";
-}
-
 void
 processrpm(FILE *fpold, struct cfile *ocf, struct cfile *cf, unsigned int *nmp, int nmpn)
 {
@@ -102,6 +92,8 @@ processrpm(FILE *fpold, struct cfile *ocf, struct cfile *cf, unsigned int *nmp, 
       exit(1);
     }
   ctype = namebuf[0];
+  if (ctype < 254)
+    ctype = CFILE_MKCOMP(ctype & 15, ctype >> 4);
   i = namebuf[1];
   if (cf->read(cf, namebuf, i) != i)
     {
@@ -136,7 +128,7 @@ processrpm(FILE *fpold, struct cfile *ocf, struct cfile *cf, unsigned int *nmp, 
   if (ctype == 254)
     printf("%s: copying unchanged payload\n", namebuf);
   else
-    printf("%s (%s): applying delta\n", namebuf, comp2str(ctype));
+    printf("%s (%s): applying delta\n", namebuf, cfile_comp2str(ctype));
   rpmn = cget4(cf);
   if (rpmn < 0 || rpmn >= nmpn)
     {

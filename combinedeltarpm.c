@@ -14,6 +14,7 @@
 
 #include <bzlib.h>
 #include <zlib.h>
+#include <lzma.h>
 #include <sys/stat.h>
 
 #include "util.h"
@@ -380,6 +381,8 @@ str2comp(char *comp)
   if (!strcmp(comp, "gzip rsyncable"))
     return CFILE_COMP_GZ_RSYNC;
 #endif
+  if (!strcmp(comp, "lzma"))
+    return CFILE_COMP_LZMA;
   if (!strcmp(comp, "uncompressed"))
     return CFILE_COMP_UN;
   fprintf(stderr, "unknown compression type: %s\n", comp);

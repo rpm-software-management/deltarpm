@@ -14,6 +14,7 @@
 
 #include <zlib.h>
 #include <bzlib.h>
+#include <lzma.h>
 
 #include "rpmoffs.h"
 #include "delta.h"
@@ -279,19 +280,6 @@ put4(FILE *fp, unsigned int d)
 
 void diffit(struct cfile *fpout, FILE *fpold, FILE *fpnew, unsigned char *old, unsigned int oldl, unsigned char *new, int newl, struct rpmpay *newpays, int newpayn, struct rpmpay *oldpays, int oldpayn, MD5_CTX *ctx);
 
-char *comp2str(int comp)
-{
-  if (comp == CFILE_COMP_UN)
-    return "uncomp.";
-  if (comp == CFILE_COMP_GZ)
-    return "gzip";
-  if (comp == CFILE_COMP_GZ_RSYNC)
-    return "gzip rsyncable";
-  if (comp == CFILE_COMP_BZ)
-    return "bzip";
-  return "???";
-}
-
 unsigned int payread(FILE *fp, off64_t off, unsigned int len, unsigned char **pp, MD5_CTX *ctx, unsigned char *namebuf)
 {
   int l, r;
@@ -402,7 +390,11 @@ processrpm(struct cfile *fpout, FILE *fpold, FILE *fpnew, struct rpmpay *pay, st
 	  namebuf[0] = 254;
 	}
       else
-	printf("%s (%s): creating delta...", namebuf + 2, comp2str(namebuf[0]));
+	{
+	  int comp = cfile_setlevel(namebuf[0], pay->level);
+	  printf("%s (%s): creating delta...", namebuf + 2, cfile_comp2str(comp));
+	  namebuf[0] = CFILE_COMPALGO(comp) | (CFILE_COMPLEVEL(comp) << 4);	/* argh! */
+	}
       fflush(stdout);
       if (fpout->write(fpout, namebuf, l + 2) != l + 2)
 	{

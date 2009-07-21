@@ -12,6 +12,7 @@
 #include <stdlib.h>
 
 #include "rpmoffs.h"
+#include "rpmhead.h"
 
 static unsigned int
 get4(unsigned char *p)
@@ -44,7 +45,7 @@ static struct rpmpay *rpmpays;
 static int rpmpayn;
 
 static void
-addrpm(char *name, off64_t o, unsigned int l)
+addrpm(char *name, off64_t o, unsigned int l, int level)
 {
   char *n;
   if ((rpmpayn & 31) == 0)
@@ -70,6 +71,7 @@ addrpm(char *name, off64_t o, unsigned int l)
   rpmpays[rpmpayn].l = l;
   rpmpays[rpmpayn].x = 0;
   rpmpays[rpmpayn].lx = 0;
+  rpmpays[rpmpayn].level = level;
   rpmpayn++;
 }
 
@@ -100,7 +102,7 @@ rpmoffs(FILE *fp, char *isoname, struct rpmpay **retp)
   unsigned char blk2[0x800];
   unsigned char name[256];
   int namel;
-  unsigned int filepos, filelen, filepos2, hstart;
+  unsigned int filepos, filelen, filepos2, hoffset;
   unsigned char *pt, *ep;
   int i, j, l, nl, el, nml, nmf, hcnt, hdcnt;
 
@@ -112,8 +114,17 @@ rpmoffs(FILE *fp, char *isoname, struct rpmpay **retp)
   unsigned int ce_off;
   unsigned int ce_len;
 
+  unsigned char *rpmb;
+  int len, rpmblen, rpmbalen;
+  int level;
+
   off64_t paystart;
   int paylen;
+  struct rpmhead *h;
+  char *payloadflags;
+
+  rpmbalen = 0x800 * 4;
+  rpmb = malloc(rpmbalen);
 
   readblk(fp, blk, 16);
   if (memcmp(blk, "\001CD001", 6))
@@ -250,58 +261,76 @@ rpmoffs(FILE *fp, char *isoname, struct rpmpay **retp)
 	    continue;
 	  if (filelen < 0x70 || strcmp((char *)name + namel - 4, ".rpm"))
 	    continue;
-	  readblk(fp, blk2, filepos);
+
 	  filepos2 = filepos;
-	  if (get4(blk2) != 0xdbeeabed)
+	  readblk(fp, rpmb, filepos2++);
+	  rpmblen = 0x800;
+	  if (get4(rpmb) != 0xdbeeabed)
 	    continue;
-	  if (get4(blk2 + 0x60) != 0x01e8ad8e)
+	  if (get4(rpmb + 0x60) != 0x01e8ad8e)
 	    {
 	      fprintf(stderr, "bad rpm (bad sigheader): %s\n", name);
 	      exit(1);
 	    }
-	  hcnt = get4n(blk2 + 0x68);
-	  hdcnt = get4n(blk2 + 0x6c);
+	  hcnt = get4n(rpmb + 0x68);
+	  hdcnt = get4n(rpmb + 0x6c);
 	  if ((hdcnt & 7) != 0)
 	   hdcnt += 8 - (hdcnt & 7);
-          if (0x70 + hcnt * 16 + hdcnt + 0x70 >= filelen)
+	  len = 0x60 + 16 + hcnt * 16 + hdcnt + 16;
+          if (len > filelen)
 	    {
 	      fprintf(stderr, "bad rpm (no header): %s\n", name);
 	      exit(1);
 	    }
-	  hstart = 0x70 + hcnt * 16 + hdcnt;
-          if (hstart >= 0x800)
+	  while (rpmblen < len)
 	    {
-	      filepos2 += hstart / 0x800;
-	      readblk(fp, blk2, filepos2);
-	      hstart &= 0x7ff;
+	      if (rpmblen + 0x800 > rpmbalen)
+		{
+		  rpmbalen += 0x800 * 4;
+		  rpmb = realloc(rpmb, rpmbalen);
+		}
+	      readblk(fp, rpmb + rpmblen, filepos2++);
+	      rpmblen += 0x800;
 	    }
-	  if (get4(blk2 + hstart) != 0x01e8ad8e)
+	  hoffset = len - 16;
+	  if (get4(rpmb + hoffset) != 0x01e8ad8e)
 	    {
 	      fprintf(stderr, "bad rpm (bad header): %s\n", name);
 	      exit(1);
 	    }
-	  hstart += 8;
-          if (hstart >= 0x800)
+	  hcnt = get4n(rpmb + hoffset + 8);
+	  hdcnt = get4n(rpmb + hoffset + 12);
+	  len += hcnt * 16 + hdcnt;
+	  if (len >= filelen)
 	    {
-	      filepos2++;
-	      readblk(fp, blk2, filepos2);
-	      hstart &= 0x7ff;
-	    }
-	  hcnt = get4n(blk2 + hstart);
-	  hdcnt = get4n(blk2 + hstart + 4);
-	  hstart += 0x8 + hcnt * 16 + hdcnt;
-          if (hstart >= 0x800)
-	    {
-	      filepos2 += hstart / 0x800;
-	      hstart &= 0x7ff;
-            }
-	  if (hstart + (filepos2 - filepos) * 0x800 > filelen)
-	    {
-	      fprintf(stderr, "bad rpm (no payload): %s\n", name);
+	      fprintf(stderr, "bad rpm (EOF): %s\n", name);
 	      exit(1);
 	    }
-	  paystart = 0x800 * (off64_t)filepos2 + hstart;
-	  paylen = filelen - (hstart + (filepos2 - filepos) * 0x800);
+	  while (rpmblen < len)
+	    {
+	      if (rpmblen + 0x800 > rpmbalen)
+		{
+		  rpmbalen += 0x800 * 4;
+		  rpmb = realloc(rpmb, rpmbalen);
+		}
+	      readblk(fp, rpmb + rpmblen, filepos2++);
+	      rpmblen += 0x800;
+	    }
+	  paystart = 0x800 * (off64_t)filepos + len;
+	  paylen = filelen - len;
+	  h = readhead_buf(rpmb + hoffset, 16 + hcnt * 16 + hdcnt, 0);
+          if (!h)
+	    {
+	      fprintf(stderr, "bad rpm (bad h): %s\n", name);
+	      exit(1);
+	    }
+	  level = 0;
+	  payloadflags = headstring(h, TAG_PAYLOADFLAGS);
+	  if (payloadflags && *payloadflags >= '1' && *payloadflags <= '9')
+	    level = *payloadflags - '0';
+
+	  free(h);
+
 	  namel -= 4;
           name[namel] = 0;
 	  l = namel;
@@ -330,11 +359,12 @@ rpmoffs(FILE *fp, char *isoname, struct rpmpay **retp)
 		    }
 		}
 	    }
-	  addrpm((char *)name, paystart, paylen);
+	  addrpm((char *)name, paystart, paylen, level);
 	}
     }
+  free(rpmb);
   sortrpm();
-  addrpm(0, 0, 0);
+  addrpm(0, 0, 0, 0);
   i = rpmpayn - 1;
   *retp = rpmpays;
   rpmpayn = 0;

@@ -10,9 +10,11 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <unistd.h>
 
 #include <zlib.h>
+#include <lzma.h>
 #include <bzlib.h>
 
 #include "rpmhead.h"
@@ -212,7 +214,7 @@ readrpm(char *name, FILE *fp, unsigned int filepos, unsigned int filelen)
       fprintf(stderr, "bad rpm (bad h): %s\n", name);
       exit(1);
     }
-  /* ok, all header are read in, extrac information */
+  /* ok, all header are read in, extract information */
   rpmn = headstring(h, TAG_NAME);
   if (!rpmn)
     {

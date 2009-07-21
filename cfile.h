@@ -9,6 +9,7 @@ struct cfile {
   int fd;
   void *fp;
   int comp;
+  int level;
   size_t len;
   unsigned char buf[4096];
   int bufN;
@@ -23,6 +24,7 @@ struct cfile {
   union {
     bz_stream bz;
     z_stream gz;
+    lzma_stream lz;
   } strm;
   int (*read)(struct cfile *f, void *buf, int len);
   int (*write)(struct cfile *f, void *buf, int len);
@@ -45,8 +47,16 @@ typedef void (*cfile_ctxup)(void *, unsigned char *, unsigned int);
 #define CFILE_COMP_XX (255)
 #define CFILE_COMP_UN (0)
 #define CFILE_COMP_GZ (1)
-#define CFILE_COMP_BZ (2)
+#define CFILE_COMP_BZ_20 (2)
 #define CFILE_COMP_GZ_RSYNC (3)
+#define CFILE_COMP_BZ_17 (4)
+#define CFILE_COMP_LZMA (5)
+
+#define CFILE_COMP_BZ CFILE_COMP_BZ_20
+
+#define CFILE_MKCOMP(comp, level) ((comp) | ((level) << 8))
+#define CFILE_COMPALGO(comp) ((comp) & 255)
+#define CFILE_COMPLEVEL(comp) ((comp) >> 8 & 255)
 
 #define CFILE_OPEN_RD ('r')
 #define CFILE_OPEN_WR ('w')
@@ -64,3 +74,5 @@ typedef void (*cfile_ctxup)(void *, unsigned char *, unsigned int);
 struct cfile *cfile_open(int mode, int fd, void *fp, int comp, size_t len, void (*ctxup)(void *, unsigned char *, unsigned int), void *ctx);
 int cfile_copy(struct cfile *in, struct cfile *out, int flags);
 int cfile_detect_rsync(struct cfile *f);
+char *cfile_comp2str(int comp);
+int cfile_setlevel(int comp, int level);

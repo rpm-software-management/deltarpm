@@ -21,6 +21,7 @@
 
 #include <bzlib.h>
 #include <zlib.h>
+#include <lzma.h>
 
 #include "util.h"
 #include "md5.h"
@@ -936,19 +937,6 @@ getblock(int id, struct seqdescr *sdesc, int nsdesc, struct fileblock *fb, int i
   return b;
 }
 
-char *comp2str(int comp)
-{
-  if (comp == CFILE_COMP_BZ)
-    return "bzip2";
-  if (comp == CFILE_COMP_GZ)
-    return "gzip";
-  if (comp == CFILE_COMP_GZ_RSYNC)
-    return "gzip rsyncable";
-  if (comp == CFILE_COMP_UN)
-    return "uncompressed";
-  return "???";
-}
-
 int
 cfile_write_uncomp(struct cfile *f, void *buf, int len)
 {
@@ -1252,13 +1240,15 @@ main(int argc, char **argv)
   addblkcomp = CFILE_COMP_BZ;
   if (d.addblklen > 9 && d.addblk[0] == 0x1f && d.addblk[1] == 0x8b)
     addblkcomp = CFILE_COMP_GZ;
+  else if (d.addblklen > 3 && (d.addblk[0] == 255 && d.addblk[1] == 'L' && d.addblk[2] == 'Z'))
+    addblkcomp = CFILE_COMP_LZMA;
   if (info)
     {
       unsigned int *size;
       if (d.version)
 	printf("deltarpm version: %c\n", d.version & 0xff);
       printf("deltarpm type: %s\n", d.h ? "standard" : d.targetcomp != CFILE_COMP_UN || d.inn != 0 || d.outn != 0 ? "rpm-only" : "rpm-only, no diff");
-      printf("deltarpm compression: %s\n", comp2str(d.deltacomp));
+      printf("deltarpm compression: %s\n", cfile_comp2str(d.deltacomp));
       printf("sequence: %s-", d.nevr);
       for (i = 0; i < d.seql; i++)
 	printf("%02x", d.seq[i]);
@@ -1271,7 +1261,7 @@ main(int argc, char **argv)
 	{
 	  printf("target payload size: %llu\n", (unsigned long long)d.paylen);
 	  if (d.targetcomp != CFILE_COMP_XX)
-	    printf("target payload compression: %s\n", comp2str(d.targetcomp));
+	    printf("target payload compression: %s\n", cfile_comp2str(d.targetcomp));
 	}
       if (d.targetsize == 0)
 	{
@@ -1294,7 +1284,7 @@ main(int argc, char **argv)
 	  printf("internal data size: %llu\n", (unsigned long long)d.inlen);
 	  printf("compressed add data size: %d\n", d.addblklen);
 	  if (d.addblklen)
-	    printf("compressed add data compression: %s\n", comp2str(addblkcomp));
+	    printf("compressed add data compression: %s\n", cfile_comp2str(addblkcomp));
 	  printf("instructions: %d\n", d.inn + d.outn);
 	}
       if (bfp)

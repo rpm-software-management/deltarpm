@@ -15,6 +15,7 @@
 
 #include <bzlib.h>
 #include <zlib.h>
+#include <lzma.h>
 
 #include "util.h"
 #include "md5.h"
@@ -347,6 +348,8 @@ str2comp(char *comp)
   if (!strcmp(comp, "gzip rsyncable"))
     return CFILE_COMP_GZ_RSYNC;
 #endif
+  if (!strcmp(comp, "lzma"))
+    return CFILE_COMP_LZMA;
   if (!strcmp(comp, "uncompressed"))
     return CFILE_COMP_UN;
   fprintf(stderr, "unknown compression type: %s\n", comp);
@@ -483,6 +486,7 @@ main(int argc, char **argv)
   int paycomp = CFILE_COMP_XX;
   int addblkcomp = CFILE_COMP_BZ;
   int targetcomp = CFILE_COMP_XX;
+  char *payloadflags;
 
   memset(&d, 0, sizeof(d));
   while ((c = getopt(argc, argv, "vV:prl:s:z:u")) != -1)
@@ -685,6 +689,8 @@ main(int argc, char **argv)
       targetcomp = CFILE_COMP_UN;
       if (paycomp == CFILE_COMP_XX)
 	paycomp = CFILE_COMP_GZ;	/* no need for better compression */
+      if (addblkcomp == CFILE_COMP_XX)
+	addblkcomp = CFILE_COMP_GZ;
       d.targetsize = fullsize;
       d.targetcomp = targetcomp;
       d.targetcomppara = 0;
@@ -760,8 +766,13 @@ main(int argc, char **argv)
 	  exit(1);
 	}
       targetcomp = newbz->comp;
+      if ((payloadflags = headstring(d.h, TAG_PAYLOADFLAGS)) != 0)
+	if (*payloadflags >= '1' && *payloadflags <= '9')
+	  targetcomp = cfile_setlevel(targetcomp, *payloadflags - '0');
       if (paycomp == CFILE_COMP_XX)
 	paycomp = targetcomp;
+      if (addblkcomp == CFILE_COMP_XX)
+	addblkcomp = targetcomp;
       while ((l = newbz->read(newbz, buf, sizeof(buf))) > 0)
 	addtocpio(&newcpio, &newcpiolen, (unsigned char *)buf, l);
       if (l < 0)
@@ -1137,8 +1148,13 @@ oaretry1:
 	  exit(1);
 	}
       targetcomp = newbz->comp;
+      if ((payloadflags = headstring(d.h, TAG_PAYLOADFLAGS)) != 0)
+	if (*payloadflags >= '1' && *payloadflags <= '9')
+	  targetcomp = cfile_setlevel(targetcomp, *payloadflags - '0');
       if (paycomp == CFILE_COMP_XX)
 	paycomp = targetcomp;
+      if (addblkcomp == CFILE_COMP_XX)
+	addblkcomp = targetcomp;
       while ((l = newbz->read(newbz, buf, sizeof(buf))) > 0)
 	addtocpio(&newcpio, &newcpiolen, (unsigned char *)buf, l);
       if (l < 0)

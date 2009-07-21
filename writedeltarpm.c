@@ -14,6 +14,7 @@
 
 #include <bzlib.h>
 #include <zlib.h>
+#include <lzma.h>
 #include <sys/stat.h>
 
 #include "md5.h"

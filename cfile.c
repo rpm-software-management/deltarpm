@@ -8,10 +8,12 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <unistd.h>
 
 #include <zlib.h>
 #include <bzlib.h>
+#include <lzma.h>
 
 #include "cfile.h"
 
@@ -274,11 +276,11 @@ crclose_bz(struct cfile *f)
 {
   int r;
   BZ2_bzDecompressEnd(&f->strm.bz);
-  if (f->fd == CFILE_IO_CFILE && f->strm.gz.avail_in)
+  if (f->fd == CFILE_IO_CFILE && f->strm.bz.avail_in)
     {
       struct cfile *cf = (struct cfile *)f->fp;
-      if (cf->unread(cf, f->strm.gz.next_in, f->strm.gz.avail_in) != -1)
-        f->strm.gz.avail_in = 0;
+      if (cf->unread(cf, f->strm.bz.next_in, f->strm.bz.avail_in) != -1)
+        f->strm.bz.avail_in = 0;
     }
   r = (f->len != CFILE_LEN_UNLIMITED ? f->len : 0) + f->strm.bz.avail_in;
   if (f->unreadbuf != f->buf)
@@ -357,7 +359,9 @@ cwclose_bz(struct cfile *f)
 static struct cfile *
 cwopen_bz(struct cfile *f)
 {
-  if (BZ2_bzCompressInit(&f->strm.bz, 9, 0, 30) != BZ_OK)
+  if (!f->level)
+    f->level = 9;
+  if (BZ2_bzCompressInit(&f->strm.bz, f->level, 0, 30) != BZ_OK)
     {
       free(f);
       return 0;
@@ -605,13 +609,15 @@ cwopen_gz(struct cfile *f)
 
   f->crc = crc32(0L, Z_NULL, 0);
   f->crclen = 0;
+  if (!f->level)
+    f->level = Z_BEST_COMPRESSION;
 #ifdef Z_RSYNCABLE
-  ret = deflateInit2(&f->strm.gz, Z_BEST_COMPRESSION, Z_DEFLATED, -MAX_WBITS, 8, Z_DEFAULT_STRATEGY | (f->comp == CFILE_COMP_GZ_RSYNC ? Z_RSYNCABLE : 0));
+  ret = deflateInit2(&f->strm.gz, f->level, Z_DEFLATED, -MAX_WBITS, 8, Z_DEFAULT_STRATEGY | (f->comp == CFILE_COMP_GZ_RSYNC ? Z_RSYNCABLE : 0));
 #else
   if (f->comp == CFILE_COMP_GZ_RSYNC)
     ret = Z_VERSION_ERROR;
   else
-    ret = deflateInit2(&f->strm.gz, Z_BEST_COMPRESSION, Z_DEFLATED, -MAX_WBITS, 8, Z_DEFAULT_STRATEGY);
+    ret = deflateInit2(&f->strm.gz, f->level, Z_DEFLATED, -MAX_WBITS, 8, Z_DEFAULT_STRATEGY);
 #endif
   if (ret != Z_OK)
     {
@@ -638,6 +644,159 @@ cwopen_gz(struct cfile *f)
 
 static int
 crunread_gz(struct cfile *f, void *buf, int len)
+{
+  return cfile_unreadbuf(f, buf, len, 0);
+}
+
+
+/*****************************************************************
+ *  lzma io
+ */
+
+static struct cfile *
+cropen_lz(struct cfile *f)
+{
+  f->strm.lz = LZMA_STREAM_INIT_VAR;
+  if (lzma_auto_decoder(&f->strm.lz, 0, 0) != LZMA_OK)
+    {
+      free(f);
+      return 0;
+    }
+  f->eof = 0;
+  f->strm.lz.avail_in = f->bufN == -1 ? 0 : f->bufN;
+  f->strm.lz.next_in  = (unsigned char *)f->buf;
+  return f;
+}
+
+static int
+crread_lz(struct cfile *f, void *buf, int len)
+{
+  int ret, used;
+  if (f->eof)
+    return 0;
+  f->strm.lz.avail_out = len;
+  f->strm.lz.next_out = buf;
+  for (;;)
+    {
+      if (f->strm.lz.avail_in == 0 && f->bufN)
+	{
+	  if (cfile_readbuf(f, f->buf, sizeof(f->buf)) == -1)
+	    return -1;
+	  f->strm.lz.avail_in = f->bufN;
+	  f->strm.lz.next_in = (unsigned char *)f->buf;
+	}
+      used = f->strm.lz.avail_in;
+      ret = lzma_code(&f->strm.lz, LZMA_RUN);
+      if (ret != LZMA_OK && ret != LZMA_STREAM_END)
+	return -1;
+      used -= f->strm.lz.avail_in;
+      if (used && f->ctxup)
+	f->ctxup(f->ctx, (unsigned char *)(f->strm.lz.next_in - used), used);
+      f->bytes += used;
+      if (ret == LZMA_STREAM_END)
+	{
+	  f->eof = 1;
+	  return len - f->strm.lz.avail_out;
+	}
+      if (f->strm.lz.avail_out == 0)
+	return len;
+      if (f->bufN == 0)
+	return -1;
+    }
+}
+
+static int
+crclose_lz(struct cfile *f)
+{
+  int r;
+  lzma_end(&f->strm.lz);
+  if (f->fd == CFILE_IO_CFILE && f->strm.lz.avail_in)
+    {
+      struct cfile *cf = (struct cfile *)f->fp;
+      if (cf->unread(cf, (void *)f->strm.lz.next_in, f->strm.lz.avail_in) != -1)
+        f->strm.lz.avail_in = 0;
+    }
+  r = (f->len != CFILE_LEN_UNLIMITED ? f->len : 0) + f->strm.lz.avail_in;
+  if (f->unreadbuf != f->buf)
+    free(f->unreadbuf);
+  free(f);
+  return r;
+}
+
+static struct cfile *
+cwopen_lz(struct cfile *f)
+{
+  lzma_options_alone alone;
+
+  if (!f->level)
+    f->level = 3;
+  lzma_init_encoder();
+  f->strm.lz = LZMA_STREAM_INIT_VAR;
+  alone.uncompressed_size = LZMA_VLI_VALUE_UNKNOWN;
+  memcpy(&alone.lzma, &lzma_preset_lzma[f->level - 1], sizeof(alone.lzma));
+  if (lzma_alone_encoder(&f->strm.lz, &alone) != LZMA_OK)
+    {
+      free(f);
+      return 0;
+    }
+  return f;
+}
+
+static int
+cwclose_lz(struct cfile *f)
+{
+  int bytes, ret, n;
+  f->strm.lz.avail_in = 0;
+  f->strm.lz.next_in = 0;
+  for (;;)
+    {
+      f->strm.lz.avail_out = sizeof(f->buf);
+      f->strm.lz.next_out = (unsigned char *)f->buf;
+      ret = lzma_code(&f->strm.lz, LZMA_FINISH);
+      if (ret != LZMA_OK && ret != LZMA_STREAM_END)
+        return -1;
+      n = sizeof(f->buf) - f->strm.lz.avail_out;
+      if (n > 0)
+        if (cfile_writebuf(f, f->buf, n) != n)
+          return -1;
+      if (ret == LZMA_STREAM_END)
+        break;
+    }
+  lzma_end(&f->strm.lz);
+  if (f->fd == CFILE_IO_ALLOC)
+    cwclose_fixupalloc(f);
+  bytes = f->bytes;
+  free(f);
+  return bytes;
+}
+
+static int
+cwwrite_lz(struct cfile *f, void *buf, int len)
+{
+  int n, ret;
+
+  if (len <= 0)
+    return len < 0 ? -1 : 0;
+  f->strm.lz.avail_in = len;
+  f->strm.lz.next_in = buf;
+  for (;;)
+    {
+      f->strm.lz.avail_out = sizeof(f->buf);
+      f->strm.lz.next_out = (unsigned char *)f->buf;
+      ret = lzma_code(&f->strm.lz, LZMA_RUN);
+      if (ret != LZMA_OK)
+	return -1;
+      n = sizeof(f->buf) - f->strm.lz.avail_out;
+      if (n > 0)
+	if (cfile_writebuf(f, f->buf, n) != n)
+	  return -1;
+      if (f->strm.lz.avail_in == 0)
+	return len;
+    }
+}
+
+static int
+crunread_lz(struct cfile *f, void *buf, int len)
 {
   return cfile_unreadbuf(f, buf, len, 0);
 }
@@ -939,10 +1098,15 @@ cfile_open(int mode, int fd, void *fp, int comp, size_t len, void (*ctxup)(void 
 	    comp = CFILE_COMP_BZ;
 	  else if (f->buf[0] == 0x1f && f->buf[1] == 0x8b)
 	    comp = CFILE_COMP_GZ;
+	  else if (f->buf[0] == 255 && f->buf[1] == 'L' && f->buf[2] == 'Z')
+	    comp = CFILE_COMP_LZMA;
+	  else if (f->buf[0] == 0135 && f->buf[1] == 0 && f->buf[2] == 0)
+	    comp = CFILE_COMP_LZMA;
 	}
     }
-  f->comp = comp;
-  switch (comp)
+  f->comp = CFILE_COMPALGO(comp);
+  f->level = CFILE_COMPLEVEL(comp);
+  switch (f->comp)
     {
     case CFILE_COMP_UN:
       f->read   = mode == CFILE_OPEN_RD ? crread_un : 0;
@@ -969,6 +1133,14 @@ cfile_open(int mode, int fd, void *fp, int comp, size_t len, void (*ctxup)(void 
       f->write  = mode == CFILE_OPEN_WR ? cwwrite_bz : 0;
       f->close  = mode == CFILE_OPEN_RD ? crclose_bz : cwclose_bz;
       return mode == CFILE_OPEN_RD ? cropen_bz(f) : cwopen_bz(f);
+    case CFILE_COMP_LZMA:
+      f->strm.lz.allocator = 0;
+      f->strm.lz.internal = 0;
+      f->read   = mode == CFILE_OPEN_RD ? crread_lz : 0;
+      f->unread = mode == CFILE_OPEN_RD ? crunread_lz : 0;
+      f->write  = mode == CFILE_OPEN_WR ? cwwrite_lz : 0;
+      f->close  = mode == CFILE_OPEN_RD ? crclose_lz : cwclose_lz;
+      return mode == CFILE_OPEN_RD ? cropen_lz(f) : cwopen_lz(f);
     default:
       free(f);
       return 0;
@@ -1009,4 +1181,49 @@ cfile_copy(struct cfile *in, struct cfile *out, int flags)
 	l = r;
     }
   return l;
+}
+
+char *
+cfile_comp2str(int comp)
+{
+  if (CFILE_COMPLEVEL(comp))
+    {
+      static char buf[64];
+      sprintf(buf, "%s.%d", cfile_comp2str(CFILE_COMPALGO(comp)), CFILE_COMPLEVEL(comp));
+      return buf;
+    }
+  switch (comp)
+    {    
+    case CFILE_COMP_UN:
+      return "uncomp.";
+    case CFILE_COMP_GZ:
+      return "gzip";
+    case CFILE_COMP_GZ_RSYNC:
+      return "gzip rsyncable";
+    case CFILE_COMP_BZ:
+      return "bzip";
+    case CFILE_COMP_LZMA:
+      return "lzma";
+    }    
+  return "???";
+}
+
+int
+cfile_setlevel(int comp, int level)
+{
+  int deflevel = 0;
+  comp = CFILE_COMPALGO(comp);
+  switch(comp)
+    {
+    case CFILE_COMP_GZ:
+    case CFILE_COMP_GZ_RSYNC:
+    case CFILE_COMP_BZ:
+      deflevel = 9;
+      break;
+    default:
+      break;
+    }
+  if (level == 0 || level == deflevel)
+    return comp;
+  return CFILE_MKCOMP(comp, level);
 }

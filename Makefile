@@ -5,7 +5,7 @@ rpmdumpheader=$(bindir)/rpmdumpheader
 zlibdir=zlib-1.2.2.f-rsyncable
 CFLAGS = -O2 -Wall
 CPPFLAGS = -DDELTARPM_64BIT -DBSDIFF_NO_SUF -DRPMDUMPHEADER=\"$(rpmdumpheader)\" -I$(zlibdir)
-LDLIBS = -lbz2 $(zlibdir)/libz.a
+LDLIBS = -lbz2 $(zlibdir)/libz.a -llzma
 LDFLAGS =
 
 all: makedeltarpm applydeltarpm rpmdumpheader makedeltaiso applydeltaiso combinedeltarpm fragiso
@@ -19,7 +19,7 @@ combinedeltarpm: combinedeltarpm.o md5.o util.o rpmhead.o cfile.o readdeltarpm.o
 rpmdumpheader: rpmdumpheader.o
 	$(CC) $(LDFLAGS) $^ -lrpm -o $@
 
-makedeltaiso: makedeltaiso.o delta.o rpmoffs.o util.o md5.o cfile.o $(zlibdir)/libz.a
+makedeltaiso: makedeltaiso.o delta.o rpmoffs.o rpmhead.o util.o md5.o cfile.o $(zlibdir)/libz.a
 
 applydeltaiso: applydeltaiso.o util.o md5.o cfile.o $(zlibdir)/libz.a
 

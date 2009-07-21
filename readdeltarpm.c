@@ -14,6 +14,7 @@
 
 #include <bzlib.h>
 #include <zlib.h>
+#include <lzma.h>
 #include <sys/stat.h>
 
 #include "util.h"
@@ -384,7 +385,9 @@ readdeltarpm(char *n, struct deltarpm *d, struct cfile **cfp)
   else
     {
       char *compressor = headstring(d->h, TAG_PAYLOADCOMPRESSOR);
-      if (compressor && !strcmp(compressor, "bzip2"))
+      if (compressor && !strcmp(compressor, "lzma"))
+	d->targetcomp = CFILE_COMP_LZMA;
+      else if (compressor && !strcmp(compressor, "bzip2"))
 	d->targetcomp = CFILE_COMP_BZ;
       else
 	d->targetcomp = CFILE_COMP_GZ;
