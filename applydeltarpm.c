@@ -1092,6 +1092,7 @@ main(int argc, char **argv)
   unsigned char buf[4096];
   MD5_CTX wrmd5;
   unsigned char wrmd5res[16];
+  int nofullmd5 = 0;
   FILE *ofp;
   int numblks;
   int percent = 0;
@@ -1200,6 +1201,7 @@ main(int argc, char **argv)
       if (verbose)
 	fprintf(vfp, "reading deltarpm\n");
       readdeltarpm(deltarpm, &d, &bfp);
+      nofullmd5 = !memcmp("\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0", d.targetmd5, 16);
 #ifdef DELTARPM_64BIT
       if (d.outlen >= 0xffffffffULL << BLKSHIFT)
 	{
@@ -1455,7 +1457,8 @@ main(int argc, char **argv)
       fprintf(stderr, "write error\n");
       exit(1);
     }
-  rpmMD5Update(&wrmd5, d.lead, d.leadl);
+  if (!nofullmd5)
+    rpmMD5Update(&wrmd5, d.lead, d.leadl);
   if (!d.h)
     fromrpm_raw = 1;
 
@@ -1484,7 +1487,24 @@ main(int argc, char **argv)
 	  exit(1);
 	}
       rpmMD5Final(wrmd5res, &wrmd5);
-      if (memcmp(wrmd5res, d.targetmd5, 16) != 0)
+      if (nofullmd5)
+        {
+          struct rpmhead *dsigh = readhead_buf(d.lead + 96, d.leadl - 96, 0);
+          if (dsigh)
+            {
+              unsigned char *hmd5 = headbin(dsigh, SIGTAG_MD5, 16);
+              if (hmd5)
+                {
+                  if (memcmp(wrmd5res, hmd5, 16) != 0)
+                    {
+                      fprintf(stderr, "%s: md5 mismatch of result\n", deltarpm);
+                      exit(1);
+                    }
+                }
+              xfree(dsigh);
+            }
+        }
+      else if (memcmp(wrmd5res, d.targetmd5, 16) != 0)
 	{
 	  fprintf(stderr, "%s: md5 mismatch of result\n", deltarpm);
 	  exit(1);
@@ -1743,7 +1763,24 @@ main(int argc, char **argv)
         fprintf(vfp, "had to call prelink %d times\n", nprelink);
     }
   rpmMD5Final(wrmd5res, &wrmd5);
-  if (memcmp(wrmd5res, d.targetmd5, 16) != 0)
+  if (nofullmd5)
+    {
+      struct rpmhead *dsigh = readhead_buf(d.lead + 96, d.leadl - 96, 0);
+      if (dsigh)
+        {
+          unsigned char *hmd5 = headbin(dsigh, SIGTAG_MD5, 16);
+          if (hmd5)
+            {
+              if (memcmp(wrmd5res, hmd5, 16) != 0)
+                {
+                  fprintf(stderr, "%s: md5 mismatch of result\n", deltarpm);
+                  exit(1);
+                }
+            }
+          xfree(dsigh);
+        }
+    }
+  else if (memcmp(wrmd5res, d.targetmd5, 16) != 0)
     {
       fprintf(stderr, "%s: md5 mismatch of result\n", deltarpm);
       exit(1);
