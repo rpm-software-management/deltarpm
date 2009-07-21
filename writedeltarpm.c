@@ -44,6 +44,7 @@ writedeltarpm(struct deltarpm *d, unsigned char **indatalist)
   int fd, i;
   MD5_CTX paymd5;
   unsigned char paymd5res[16];
+  unsigned char oldpayformat[4];
   unsigned int written;
   struct cfile *bfd;
   unsigned char sighdr[16 + 16 * 3 + 4 + 16 + 16 + 4];
@@ -118,12 +119,19 @@ writedeltarpm(struct deltarpm *d, unsigned char **indatalist)
 	  exit(1);
 	}
       rpmMD5Update(&paymd5, d->h->intro, 16);
+      if (d->payformatoff)
+	{
+	  memcpy(oldpayformat, d->h->dp + d->payformatoff, 4);
+	  memcpy(d->h->dp + d->payformatoff, "drpm", 4);
+	}
       if (write(fd, d->h->data, 16 * d->h->cnt + d->h->dcnt) != 16 * d->h->cnt + d->h->dcnt)
 	{
 	  perror("hdr write");
 	  exit(1);
 	}
       rpmMD5Update(&paymd5, d->h->data, 16 * d->h->cnt + d->h->dcnt);
+      if (d->payformatoff)
+	memcpy(d->h->dp + d->payformatoff, oldpayformat, 4);
     }
   else
     {

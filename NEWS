@@ -1,4 +1,8 @@
 
+ What's new in deltarpm-3.5
+----------------------------
+- support for sha256 file digests
+
  What's new in deltarpm-3.4
 ----------------------------
 
