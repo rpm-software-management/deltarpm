@@ -919,7 +919,7 @@ assemble(char *fiso, char *dir, char *iso)
 	    }
 	}
       o = pays[i].o;
-      sprintf(dbuf + dl, "%010llx:%08x", pays[i].o, pays[i].l);
+      sprintf(dbuf + dl, "%010llx:%08x", (unsigned long long)pays[i].o, pays[i].l);
       if ((rfp = fopen64(dbuf, "r")) == 0)
 	{
 	  perror(dbuf);

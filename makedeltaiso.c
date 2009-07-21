@@ -136,7 +136,7 @@ recode_instr(struct instr *instr, int instrlen, unsigned int **b1p, int *nb1p, u
   nb1 = nb2 = 0;
   j = 0;  
   lastoff = 0;
-  left = pay ? pay[0].lx : 0;
+  left = pay && payn ? pay[0].lx : 0;
   payp = 0;
   for (i = 0; i < instrlen; i++)
     {

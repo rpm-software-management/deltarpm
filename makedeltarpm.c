@@ -562,7 +562,7 @@ main(int argc, char **argv)
       nevr1 = rpmlread(pfp, argv[argc - 5 + alone], 0, &files1, &nfiles1);
       fclose(pfp);
       pfd = open(argv[argc - 4 + alone], O_RDONLY);
-      if (pfp < 0)
+      if (pfd < 0)
 	{
 	  perror(argv[argc - 4 + alone]);
 	  exit(1);
@@ -802,7 +802,6 @@ main(int argc, char **argv)
     fprintf(vfp, "reading old rpm...\n");
   if (rpmonly)
     {
-      write(3, oldcpio, oldcpiolen);
       while ((l = bfd->read(bfd, buf, sizeof(buf))) > 0)
 	addtocpio(&oldcpio, &oldcpiolen, (unsigned char *)buf, l);
     }
