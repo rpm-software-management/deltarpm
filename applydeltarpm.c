@@ -25,6 +25,7 @@
 
 #include "util.h"
 #include "md5.h"
+#include "sha256.h"
 #include "rpmhead.h"
 #include "cpio.h"
 #include "cfile.h"
@@ -956,13 +957,63 @@ cfile_write_uncomp(struct cfile *f, void *buf, int len)
   return len;
 }
 
+typedef struct {
+  union {
+    MD5_CTX md5ctx;
+    SHA256_ctx sha256ctx;
+  } ctx;
+} DIG_CTX;
+
+
+static inline void
+DIG_Init(DIG_CTX *ctx, int digestalgo)
+{
+  if (digestalgo == 1)
+    rpmMD5Init(&ctx->ctx.md5ctx);
+  else if (digestalgo == 8)
+    SHA256_init(&ctx->ctx.sha256ctx);
+}
+
+static inline void
+DIG_Update(DIG_CTX *ctx, int digestalgo, unsigned char const *buf, unsigned len)
+{
+  if (digestalgo == 1)
+    rpmMD5Update(&ctx->ctx.md5ctx, buf, len);
+  else if (digestalgo == 8)
+    SHA256_update(&ctx->ctx.sha256ctx, buf, len);
+}
+
+static inline void
+DIG_Final(DIG_CTX *ctx, int digestalgo, unsigned char *digest)
+{
+  if (digestalgo == 1)
+    rpmMD5Final(digest, &ctx->ctx.md5ctx);
+  else if (digestalgo == 8)
+    {
+      SHA256_final(&ctx->ctx.sha256ctx);
+      SHA256_digest(&ctx->ctx.sha256ctx, digest);
+    }
+  else
+    *digest = 0;
+}
+
+static inline int
+DIG_Len(int digestalgo)
+{
+  if (digestalgo == 1)
+    return 16;
+  if (digestalgo == 8)
+    return 32;
+  return 0;
+}
+
 int
-checkprelinked(char *name, unsigned char *hmd5, unsigned int size)
+checkprelinked(char *name, int digestalgo, unsigned char *hmd5, unsigned int size)
 {
   int fd, l;
   unsigned char buf[4096];
-  MD5_CTX ctx;
-  unsigned char md5[16];
+  DIG_CTX ctx;
+  unsigned char md5[32];
 
   nprelink++;
   if ((fd = prelinked_open(name)) < 0)
@@ -970,17 +1021,17 @@ checkprelinked(char *name, unsigned char *hmd5, unsigned int size)
       perror(name);
       return -1;
     }
-  rpmMD5Init(&ctx);
+  DIG_Init(&ctx, digestalgo);
   while (size && (l = read(fd, buf, sizeof(buf))) > 0)
     {
       if (l > size)
 	l = size;
-      rpmMD5Update(&ctx, buf, l);
+      DIG_Update(&ctx, digestalgo, buf, l);
       size -= l;
     }
   close(fd);
-  rpmMD5Final(md5, &ctx);
-  if (memcmp(md5, hmd5, 16))
+  DIG_Final(&ctx, digestalgo, md5);
+  if (memcmp(md5, hmd5, DIG_Len(digestalgo)))
     {
       fprintf(stderr, "%s: contents have been changed\n", name);
       return -1;
@@ -989,12 +1040,12 @@ checkprelinked(char *name, unsigned char *hmd5, unsigned int size)
 }
 
 int
-checkfilemd5(char *name, unsigned char *hmd5, unsigned int size)
+checkfilemd5(char *name, int digestalgo, unsigned char *hmd5, unsigned int size)
 {
   int fd, l;
   unsigned char buf[4096];
-  MD5_CTX ctx;
-  unsigned char md5[16];
+  DIG_CTX ctx;
+  unsigned char md5[32];
   struct stat stb;
 
   if ((fd = open(name, O_RDONLY)) < 0 || fstat(fd, &stb))
@@ -1002,29 +1053,29 @@ checkfilemd5(char *name, unsigned char *hmd5, unsigned int size)
       perror(name);
       return -1;
     }
-  rpmMD5Init(&ctx);
+  DIG_Init(&ctx, digestalgo);
   if (stb.st_size > size && (l = read(fd, buf, sizeof(buf))) > 0)
     {
       if (is_prelinked(fd, buf, l))
 	{
 	  close(fd);
-	  return checkprelinked(name, hmd5, size);
+	  return checkprelinked(name, digestalgo, hmd5, size);
 	}
       if (l > size)
 	l = size;
-      rpmMD5Update(&ctx, buf, l);
+      DIG_Update(&ctx, digestalgo, buf, l);
       size -= l;
     }
   while (size && (l = read(fd, buf, sizeof(buf))) > 0)
     {
       if (l > size)
 	l = size;
-      rpmMD5Update(&ctx, buf, l);
+      DIG_Update(&ctx, digestalgo, buf, l);
       size -= l;
     }
   close(fd);
-  rpmMD5Final(md5, &ctx);
-  if (memcmp(md5, hmd5, 16))
+  DIG_Final(&ctx, digestalgo, md5);
+  if (memcmp(md5, hmd5, DIG_Len(digestalgo)))
     {
       fprintf(stderr, "%s: contents have been changed\n", name);
       return -1;
@@ -1033,7 +1084,7 @@ checkfilemd5(char *name, unsigned char *hmd5, unsigned int size)
 }
 
 int
-checkfilesize(char *name, unsigned char *hmd5, unsigned int size)
+checkfilesize(char *name, int digestalgo, unsigned char *hmd5, unsigned int size)
 {
   struct stat stb;
   unsigned char buf[128];
@@ -1053,7 +1104,7 @@ checkfilesize(char *name, unsigned char *hmd5, unsigned int size)
       if (fd != -1 && (l = read(fd, buf, sizeof(buf))) > 0 && is_prelinked(fd, buf, l))
 	{
 	  close(fd);
-	  return checkprelinked(name, hmd5, size);
+	  return checkprelinked(name, digestalgo, hmd5, size);
 	}
       if (fd != -1)
         close(fd);
@@ -1403,7 +1454,7 @@ main(int argc, char **argv)
     }
   if (d.h || seqcheck)
     {
-      int (*checkfunc)(char *, unsigned char *, unsigned int);
+      int (*checkfunc)(char *, int, unsigned char *, unsigned int);
       if (headtofb(h, &fb))
 	{
 	  fprintf(stderr, "bad header\n");

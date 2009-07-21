@@ -438,6 +438,8 @@ main(int argc, char **argv)
   int filecnt;
   char **filenames, **filemd5s, **filelinktos;
   unsigned int *fileflags, *filemodes, *filerdevs, *filesizes, *fileverify, *filecolors;
+  int digestalgo = 1;
+  unsigned int *digestalgoarray;
   int i, fd, l, l2, l3;
   struct cfile *bfd;
   struct cpiophys cph;
@@ -756,6 +758,17 @@ main(int argc, char **argv)
   filelinktos = headstringarray(h, TAG_FILELINKTOS, (int *)0);
   filecolors = headint32(h, TAG_FILECOLORS, (int *)0);
 
+  if ((digestalgoarray = headint32(h, TAG_FILEDIGESTALGO, (int *)0)))
+    {
+      digestalgo = digestalgoarray[0];
+      free(digestalgoarray);
+    }
+  if (digestalgo != 1 && digestalgo != 8)
+    {
+      fprintf(stderr, "Unknown digest type: %d\n", digestalgo);
+      exit(1);
+    }
+
   if (alone)
     {
       d.h = h;
@@ -1025,9 +1038,17 @@ oaretry1:
 		}
 	      if (S_ISREG(filemodes[i]) && lsize)
 		{
-		  unsigned char fmd5[16];
-		  parsemd5(filemd5s[i], fmd5);
-		  rpmMD5Update(&seqmd5, fmd5, 16);
+		  unsigned char fmd5[32];
+		  if (digestalgo == 1)
+		    {
+		      parsemd5(filemd5s[i], fmd5);
+		      rpmMD5Update(&seqmd5, fmd5, 16);
+		    }
+		  else
+		    {
+		      parsesha256(filemd5s[i], fmd5);
+		      rpmMD5Update(&seqmd5, fmd5, 32);
+		    }
 		}
 	      addtoseq(i);
 	    }

@@ -23,6 +23,7 @@ struct fileblock
   unsigned int *filerdevs;
   char **filelinktos;
   char **filemd5s;
+  int digestalgo;
 };
 
 
@@ -86,7 +87,7 @@ struct deltarpm {
 
 /* from readdeltarpm.c */
 int headtofb(struct rpmhead *h, struct fileblock *fb);
-struct seqdescr *expandseq(unsigned char *seq, int seql, int *nump, struct fileblock *fb, int (*checkfunc)(char *, unsigned char *, unsigned int));
+struct seqdescr *expandseq(unsigned char *seq, int seql, int *nump, struct fileblock *fb, int (*checkfunc)(char *, int, unsigned char *, unsigned int));
 void readdeltarpm(char *n, struct deltarpm *d, struct cfile **cfp);
 
 /* from writedeltarpm.c */

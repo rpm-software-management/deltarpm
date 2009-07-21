@@ -12,7 +12,7 @@ all: makedeltarpm applydeltarpm rpmdumpheader makedeltaiso applydeltaiso combine
 
 makedeltarpm: makedeltarpm.o writedeltarpm.o md5.o util.o rpml.o rpmhead.o cpio.o delta.o cfile.o $(zlibdir)/libz.a
 
-applydeltarpm: applydeltarpm.o readdeltarpm.o md5.o util.o rpmhead.o cpio.o cfile.o prelink.o $(zlibdir)/libz.a
+applydeltarpm: applydeltarpm.o readdeltarpm.o md5.o sha256.o util.o rpmhead.o cpio.o cfile.o prelink.o $(zlibdir)/libz.a
 
 combinedeltarpm: combinedeltarpm.o md5.o util.o rpmhead.o cfile.o readdeltarpm.o writedeltarpm.o $(zlibdir)/libz.a
 

@@ -153,3 +153,19 @@ parsemd5(char *s, unsigned char *md5)
       exit(1);
     }
 }
+
+void
+parsesha256(char *s, unsigned char *sha256)
+{
+  if (!*s)
+    {
+      memset(sha256, 0, 32);
+      return;
+    }
+  if (parsehex(s, sha256, 32) != 32)
+    {
+      fprintf(stderr, "parsesha256: bad sha256\n");
+      exit(1);
+    }
+}
+

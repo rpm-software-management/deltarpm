@@ -32,6 +32,7 @@
 int
 headtofb(struct rpmhead *h, struct fileblock *fb)
 {
+  unsigned int *digestalgoarray;
   fb->h = h;
   fb->filelinktos = fb->filemd5s = 0;
   fb->filemodes = fb->filesizes = 0;
@@ -46,6 +47,17 @@ headtofb(struct rpmhead *h, struct fileblock *fb)
   fb->filerdevs = headint16(h, TAG_FILERDEVS, (int *)0);
   fb->filelinktos = headstringarray(h, TAG_FILELINKTOS, (int *)0);
   fb->filemd5s = headstringarray(h, TAG_FILEMD5S, (int *)0);
+  fb->digestalgo = 1;
+  if ((digestalgoarray = headint32(h, TAG_FILEDIGESTALGO, (int *)0)))
+    {
+      fb->digestalgo = digestalgoarray[0];
+      free(digestalgoarray);
+    }
+  if (fb->digestalgo != 1 && fb->digestalgo != 8)
+    {
+      fprintf(stderr, "Unknown digest type: %d\n", fb->digestalgo);
+      exit(1);
+    }
   return 0;
 }
 
@@ -55,7 +67,7 @@ headtofb(struct rpmhead *h, struct fileblock *fb)
  */
 
 struct seqdescr *
-expandseq(unsigned char *seq, int seql, int *nump, struct fileblock *fb, int (*checkfunc)(char *, unsigned char *, unsigned int))
+expandseq(unsigned char *seq, int seql, int *nump, struct fileblock *fb, int (*checkfunc)(char *, int, unsigned char *, unsigned int))
 {
   unsigned char *s;
   char *fn;
@@ -66,7 +78,7 @@ expandseq(unsigned char *seq, int seql, int *nump, struct fileblock *fb, int (*c
   unsigned char seqmd5res[16];
   struct seqdescr *sd;
   drpmuint off;
-  unsigned char fmd5[16];
+  unsigned char fmd5[32];
   int error = 0;
 
   n = num = nib = shi = jump = pos = 0;
@@ -166,10 +178,16 @@ expandseq(unsigned char *seq, int seql, int *nump, struct fileblock *fb, int (*c
 	rpmMD5Update(&seqmd5, (unsigned char *)fb->filelinktos[i], strlen(fb->filelinktos[i]) + 1);
       else if (S_ISREG(fb->filemodes[i]) && lsize)
 	{
-	  parsemd5(fb->filemd5s[i], fmd5);
-	  if (checkfunc && checkfunc(fb->filenames[i], fmd5, lsize))
+	  if (fb->digestalgo == 1)
+	    parsemd5(fb->filemd5s[i], fmd5);
+	  else
+	    parsesha256(fb->filemd5s[i], fmd5);
+	  if (checkfunc && checkfunc(fb->filenames[i], fb->digestalgo, fmd5, lsize))
 	    error = 1;
-	  rpmMD5Update(&seqmd5, fmd5, 16);
+	  if (fb->digestalgo == 1)
+	    rpmMD5Update(&seqmd5, fmd5, 16);
+	  else
+	    rpmMD5Update(&seqmd5, fmd5, 32);
 	}
       sd[n].off = off;
       off += sd[n].cpiolen + sd[n].datalen;
