@@ -1,0 +1,3963 @@
+#!/usr/bin/perl -w
+
+#
+# Copyright (c) 2005 Michael Schroeder (mls@suse.de)
+#
+# This program is licensed under the BSD license, read LICENSE.BSD
+# for further information
+#
+
+use Socket;
+use Fcntl qw(:DEFAULT :flock);
+use POSIX;
+use Digest::MD5 ();
+use Net::Domain ();
+use bytes;
+my $have_zlib;
+my $have_time_hires;
+eval {
+  require Compress::Zlib;
+  $have_zlib = 1;
+};
+eval {
+  require Time::HiRes;
+  $have_time_hires = 1 if defined &Time::HiRes::gettimeofday;
+};
+use strict;
+
+$SIG{'PIPE'} = 'IGNORE';
+
+#######################################################################
+# Common code user for Client and Server
+#######################################################################
+
+my $makedeltarpm = 'makedeltarpm';
+my $combinedeltarpm = 'combinedeltarpm';
+my $applydeltarpm = 'applydeltarpm';
+my $fragiso = 'fragiso';
+
+sub stdinopen {
+  local *F = shift;
+  local *I = shift;
+  my $pid;
+  while (1) {
+    $pid = open(F, '-|');
+    last if defined $pid;
+    return if $! != POSIX::EAGAIN;
+    sleep(5);
+  }
+  return 1 if $pid;
+  if (fileno(I) != 0) {
+    open(STDIN, "<&I") || die("dup stdin: $!\n");
+    close(I);
+  }
+  exec @_;
+  die("$_[0]: $!\n");
+}
+
+sub tmpopen {
+  local *F = shift;
+  my $tmpdir = shift;
+
+  my $tries = 0;
+  for ($tries = 0; $tries < 100; $tries++) {
+    if (sysopen(F, "$tmpdir/drpmsync.$$.$tries", POSIX::O_RDWR|POSIX::O_CREAT|POSIX::O_EXCL, 0600)) {
+      unlink("$tmpdir/drpmsync.$$.$tries");
+      return 1;
+    }
+  }
+  return;
+}
+
+# cannot use IPC::Open3, sigh...
+sub runprg {
+  return runprg_job(undef, @_);
+}
+
+sub runprg_job {
+  my ($job, $if, $of, @prg) = @_;
+  local (*O, *OW, *E, *EW);
+  if (!$of) {
+    pipe(O, OW) || die("pipe: $!\n");
+  }
+  pipe(E, EW) || die("pipe: $!\n");
+  my $pid;
+  while (1) {
+    $pid = fork();
+    last if defined $pid;
+    return ('', "runprg: fork: $!") if $! != POSIX::EAGAIN;
+    sleep(5);
+  }
+  if ($pid == 0) {
+    if ($of) {
+      *OW = $of;
+    } else {
+      close(O);
+    }
+    close(E);
+    if (fileno(OW) != 1) {
+      open(STDOUT, ">&OW") || die("dup stdout: $!\n");
+      close(OW);
+    }
+    if (fileno(EW) != 2) {
+      open(STDERR, ">&EW") || die("dup stderr: $!\n");
+      close(EW);
+    }
+    if (defined($if)) {
+      local (*I) = $if;
+      if (fileno(I) != 0) {
+        open(STDIN, "<&I") || die("dup stdin: $!\n");
+        close(I);
+      }
+    } else {
+      open(STDIN, "</dev/null");
+    }
+    exec @prg;
+    die("$prg[0]: $!\n");
+  }
+  close(OW) unless $of;
+  close(EW);
+
+  if ($job) {
+    $job->{'PID'} = $pid;
+    $job->{'E'} = *E;
+    delete $job->{'O'};
+    $job->{'O'} = *O unless $of;
+    return $job;
+  }
+  $job = {};
+  $job->{'PID'} = $pid;
+  $job->{'E'} = *E;
+  $job->{'O'} = *O unless $of;
+  return runprg_finish($job);
+}
+
+sub runprg_finish {
+  my ($job) = @_;
+
+  die("runprg_finish: no job running\n") unless $job && $job->{'PID'};
+  my ($out, $err) = ('', '');
+  my $pid = $job->{'PID'};
+  local *E = $job->{'E'};
+  local *O;
+  my $of = 1;
+  if (exists $job->{'O'}) {
+    $of = undef;
+    *O = $job->{'O'};
+  }
+  delete $job->{'PID'};
+  delete $job->{'O'};
+  delete $job->{'E'};
+  my $rin = '';
+  my $efd = fileno(E);
+  my $ofd;
+  if (!$of) {
+    $ofd = fileno(O);
+    vec($rin, $ofd, 1) = 1;
+  }
+  vec($rin, $efd, 1) = 1;
+  my $nfound;
+  my $rout;
+  my $openfds = $of ? 2 : 3;
+  while ($openfds) {
+    $nfound = select($rout = $rin, undef, undef, undef);
+    if (!defined($nfound)) {
+      $err .= "select: $!";
+      close(O) if $openfds & 1;
+      close(E) if $openfds & 2;
+      last;
+    }
+    if (!$of && vec($rout, $ofd, 1)) {
+      if (!sysread(O, $out, 4096, length($out))) {
+	vec($rin, $ofd, 1) = 0;
+	close(O);
+	$openfds &= ~1;
+      }
+    }
+    if (vec($rout, $efd, 1)) {
+      if (!sysread(E, $err, 4096, length($err))) {
+	vec($rin, $efd, 1) = 0;
+	close(E);
+	$openfds &= ~2;
+      }
+    }
+  }
+  while(1) {
+    if (waitpid($pid, 0) == $pid) {
+      $err = "Error $?" if $? && $err eq '';
+      last;
+    }
+    if ($! != POSIX::EINTR) {
+      $err = "waitpid: $!";
+      last;
+    }
+  }
+  return ($out, $err);
+}
+
+sub cprpm {
+  local *F = shift;
+  my ($wri, $verify, $ml) = @_;
+
+  local *WF;
+  *WF = $wri if $wri;
+
+  my $ctx;
+  $ctx = Digest::MD5->new if $verify;
+
+  my $buf = '';
+  my $l;
+  while (length($buf) < 96 + 16) {
+    $l = sysread(F, $buf, defined($ml) && $ml < 4096 ? $ml : 4096, length($buf));
+    return "read error" unless $l;
+    $ml -= $l if defined $ml;
+  }
+  my ($magic, $sigtype) = unpack('N@78n', $buf);
+  return "not a rpm (bad magic of header type" unless $magic == 0xedabeedb && $sigtype == 5;
+  my ($headmagic, $cnt, $cntdata) = unpack('@96N@104NN', $buf);
+  return "not a rpm (bad sig header magic)" unless $headmagic == 0x8eade801;
+  my $hlen = 96 + 16 + $cnt * 16 + $cntdata;
+  $hlen = ($hlen + 7) & ~7;
+  while (length($buf) < $hlen) {
+    $l = sysread(F, $buf, defined($ml) && $ml < 4096 ? $ml : 4096, length($buf));
+    return "read error" unless $l;
+    $ml -= $l if defined $ml;
+  }
+  my $lmd5 = Digest::MD5::md5_hex(substr($buf, 0, $hlen));
+  my $idxarea = substr($buf, 96 + 16, $cnt * 16);
+  if (!($idxarea =~ /\A(?:.{16})*\000\000\003\354\000\000\000\007(....)\000\000\000\020/s)) {
+     return "no md5 signature header";
+  }
+  my $md5off = unpack('N', $1);
+  return "bad md5 offset" if $md5off >= $cntdata;
+  $md5off += 96 + 16 + $cnt * 16;
+  my $hmd5 = unpack("\@${md5off}H32", $buf);
+  return "write error" if $wri && (syswrite(WF, substr($buf, 0, $hlen)) || 0) != $hlen;
+  $buf = substr($buf, $hlen);
+  while (length($buf) < 16) {
+    $l = sysread(F, $buf, defined($ml) && $ml < 4096 ? $ml : 4096, length($buf));
+    return "read error" unless $l;
+    $ml -= $l if defined $ml;
+  }
+  ($headmagic, $cnt, $cntdata) = unpack('N@8NN', $buf);
+  return "not a rpm (bad header magic)" unless $headmagic == 0x8eade801;
+  $hlen = 16 + $cnt * 16;
+  while (length($buf) < $hlen) {
+    $l = sysread(F, $buf, defined($ml) && $ml < 4096 ? $ml : 4096, length($buf));
+    return "read error" unless $l;
+    $ml -= $l if defined $ml;
+  }
+  my ($nameoff, $archoff, $btoff);
+  $idxarea = substr($buf, 0, $hlen);
+  my $srctype = '';
+  if (!($idxarea =~ /\A(?:.{16})*\000\000\004\024/s)) {
+    if (($idxarea =~ /\A(?:.{16})*\000\000\004[\033\034]/s)) {
+      $srctype = 'nosrc';
+    } else {
+      $srctype = 'src';
+    }
+  }
+  if (($idxarea =~ /\A(?:.{16})*\000\000\003\350\000\000\000\006(....)\000\000\000\001/s)) {
+    $nameoff = unpack('N', $1);
+  }
+  if (($idxarea =~ /\A(?:.{16})*\000\000\003\376\000\000\000\006(....)\000\000\000\001/s)) {
+    $archoff = unpack('N', $1);
+  }
+  if (($idxarea =~ /\A(?:.{16})*\000\000\003\356\000\000\000\004(....)\000\000\000\001/s)) {
+    $btoff = unpack('N', $1);
+  }
+  return "rpm contains no name tag" unless defined $nameoff;
+  return "rpm contains no arch tag" unless defined $archoff;
+  return "rpm contains no build time" unless defined $btoff;
+  return "bad name/arch offset" if $nameoff >= $cntdata || $archoff >= $cntdata || $btoff + 3 >= $cntdata;
+  $ctx->add(substr($buf, 0, $hlen)) if $verify;
+  return "write error" if $wri && (syswrite(WF, substr($buf, 0, $hlen)) || 0) != $hlen;
+  $buf = substr($buf, $hlen);
+  my $maxoff = $nameoff > $archoff ? $nameoff : $archoff;
+  $maxoff += 1024;	# should be enough
+  $maxoff = $btoff + 4 if $btoff + 4 > $maxoff;
+  $maxoff = $cntdata if $maxoff > $cntdata;
+  while (length($buf) < $maxoff) {
+    $l = sysread(F, $buf, defined($ml) && $ml < 4096 ? $ml : 4096, length($buf));
+    return "read error" unless $l;
+    $ml -= $l if defined $ml;
+  }
+  my $name = unpack("\@${nameoff}Z*", $buf);
+  my $arch = unpack("\@${archoff}Z*", $buf);
+  my $bt = unpack("\@${btoff}H8", $buf);
+  if ($verify || $wri) {
+    $ctx->add($buf) if $verify;
+    return "write error" if $wri && (syswrite(WF, $buf) || 0) != length($buf);
+    while(1) {
+      last if defined($ml) && $ml == 0;
+      $l = sysread(F, $buf, defined($ml) && $ml < 8192 ? $ml : 8192);
+      last if !$l && !defined($ml);
+      return "read error" unless $l;
+      $ml -= $l if defined $ml;
+      $ctx->add($buf) if $verify;
+      return "write error" if $wri && (syswrite(WF, $buf) || 0) != $l;
+    }
+    if ($verify) {
+      my $rmd5 = $ctx->hexdigest;
+      return "rpm checksum error ($rmd5 != $hmd5)" if $rmd5 ne $hmd5;
+    }
+  }
+  $name = "unknown" if $name =~ /[\000-\040\/]/;
+  $arch = "unknown" if $arch =~ /[\000-\040\/]/;
+  $arch = $srctype if $srctype;
+  return ("$lmd5$hmd5", $bt, "$name.$arch");
+}
+
+sub cpfile {
+  local *F = shift;
+  my ($wri) = @_;
+
+  local *WF;
+  *WF = $wri if $wri;
+  my $ctx;
+  $ctx = Digest::MD5->new;
+  my ($buf, $l);
+  while(1) {
+    $l = sysread(F, $buf, 8192);
+    last if !$l;
+    die("cpfile read error\n") unless $l;
+    $ctx->add($buf);
+    die("cpfile write error\n") if $wri && (syswrite(WF, $buf) || 0) != $l;
+  }
+  return ($ctx->hexdigest);
+}
+
+sub rpminfo_f {
+  my ($fd, $rpm) = @_;
+  my @info = cprpm($fd);
+  if (@info == 1) {
+    warn("$rpm: $info[0]\n");
+    return ();
+  }
+  return @info;
+}
+
+sub rpminfo {
+  my $rpm = shift;
+  local *RPM;
+  if (!open(RPM, '<', $rpm)) {
+    warn("$rpm: $!\n");
+    return ();
+  }
+  my @ret = rpminfo_f(*RPM, $rpm);
+  close RPM;
+  return @ret;
+}
+
+sub fileinfo_f {
+  local (*F) = shift;
+
+  my $ctx = Digest::MD5->new;
+  $ctx->addfile(*F);
+  return $ctx->hexdigest;
+}
+
+sub fileinfo {
+  my $fn = shift;
+  local *FN;
+  if (!open(FN, '<', $fn)) {
+    warn("$fn: $!\n");
+    return ();
+  }
+  my @ret = fileinfo_f(*FN, $fn);
+  close FN;
+  return @ret;
+}
+
+sub linkinfo {
+  my $fn = shift;
+  my $fnc = readlink($fn);
+  if (!defined($fnc)) {
+    warn("$fn: $!\n");
+    return ();
+  }
+  return Digest::MD5::md5_hex($fnc);
+}
+
+my @filter_comp;
+my @filter_arch_comp;
+
+sub run_filter {
+  my @x = @_;
+
+  my @f = @filter_comp;
+  my @r;
+  while (@f) {
+    my ($ft, $fre) = splice(@f, 0, 3);
+    my @xx = grep {/$fre/} @x;
+    my %xx = map {$_ => 1} @xx;
+    push @r, @xx if $ft;
+    @x = grep {!$xx{$_}} @x;
+  }
+  return (@r, @x);
+}
+
+sub run_filter_one {
+  my ($n) = @_;
+  my @f = @filter_comp;
+  while (@f) {
+    my ($ft, $fre) = splice(@f, 0, 3);
+    if ($ft) {
+      return 1 if $n =~ /$fre/;
+    } else {
+      return if $n =~ /$fre/;
+    }
+  }
+  return 1;
+}
+
+sub compile_filter {
+  my @rules = @_;
+
+  my @comp = ();
+  for my $rule (@rules) {
+    die("bad filter type, must be '+' or '-'\n") unless $rule =~ /^([+-])(.*)$/;
+    my $type = $1 eq '+' ? 1 : 0;
+    my $match = $2;
+    my $anchored = $match =~ s/^\///;
+    my @match = split(/\[(\^?.(?:\\.|[^]])*)\]/, $match, -1);
+    my $i = 0;
+    for (@match) {
+      $i = 1 - $i;
+      if (!$i) {
+	s/([^-\^a-zA-Z0-9])/\\$1/g;
+	s/\\\\(\\[]\\\]]|-)/"\\".substr($1, -1)/ge;
+	$_ = "[$_]";
+	next;
+      }
+      $_ = "\Q$_\E";
+      s/\\\*\\\*/.*/g;
+      s/\\\*/[^\/]*/g;
+      s/\\\?/[^\/]/g;
+    }
+    $match = join('', @match);
+    if ($anchored) {
+      $match = "^$match";
+    } else {
+      $match = "(?:^|\/)$match";
+    }
+    $match .= '\/?' if $match !~ /\/$/;
+    $match .= '$';
+    eval {
+      push @comp, $type, qr/$match/s, $rule;
+    };
+    die("bad filter rule: $rule\n") if $@;
+  }
+  return @comp;
+}
+
+sub filelist_apply_filter {
+  my ($flp) = @_;
+  return unless @filter_comp;
+  my @ns = ();
+  my $x;
+  for my $e (@$flp) {
+    if (defined($x)) {
+      next if substr($e->[0], 0, length($x)) eq $x;
+      undef $x;
+    }
+    if (@$e == 3) {
+      if (!run_filter_one("$e->[0]/")) {
+        $x = "$e->[0]/";
+	next;
+      }
+    } else {
+      next if !run_filter_one("$e->[0]");
+    }
+    push @ns, $e;
+  }
+  @$flp = @ns;
+}
+
+sub filelist_apply_filter_arch {
+  my ($flp) = @_;
+  return unless @filter_arch_comp;
+  my %filtered;
+  my @filter_comp_save = @filter_comp;
+  @filter_comp = @filter_arch_comp;
+  my @ns = ();
+  for my $e (@$flp) {
+    if (@$e > 5 && !run_filter_one((split('\.', $e->[5]))[-1])) {
+      if ($e->[0] =~ /(.*)\.rpm$/) {
+        $filtered{"$1.changes"} = 1;
+        $filtered{"$1-MD5SUMS.meta"} = 1;
+        $filtered{"$1-MD5SUMS.srcdir"} = 1;
+      }
+      next;
+    }
+    push @ns, $e;
+  }
+  @filter_comp = @filter_comp_save;
+  @$flp = @ns;
+  if (%filtered) {
+    # second pass to remove meta files
+    @ns = ();
+    for my $e (@$flp) {
+      next if @$e == 4 && $filtered{$e->[0]};
+      push @ns, $e;
+    }
+    @$flp = @ns;
+  }
+}
+
+sub filelist_exclude_drpmsync {
+  my ($flp) = @_;
+  @$flp = grep {$_->[0] =~ /(?:^|\/)drpmsync\//s || (@$_ == 3 && $_->[0] =~ /(?:^|\/)drpmsync$/s)} @$flp;
+}
+
+my @files;
+my %cache;
+my $cachehits = 0;
+my $cachemisses = 0;
+
+sub findfiles {
+  my ($bdir, $dir, $keepdrpmdir, $norecurse) = @_;
+
+  local *DH;
+  if (!opendir(DH, "$bdir$dir")) {
+    warn("$dir: $!\n");
+    return;
+  }
+  my @ents = sort readdir(DH);
+  closedir(DH);
+  $bdir .= '/' if $dir eq '';
+  $dir .= '/' if $dir ne '';
+  if ($dir ne '' && grep {$_ eq 'drpmsync'} @ents) {
+    readcache("$bdir${dir}drpmsync/cache") if -f "$bdir${dir}drpmsync/cache";
+  }
+  my %fents;
+  if (@filter_comp) {
+    @ents = grep {$_ ne '.' && $_ ne '..'} @ents;
+    my @fents = run_filter(map {"$dir$_"} @ents);
+    if (@fents != @ents) {
+      %fents = map {("$dir$_" => 1)} @ents;
+      delete $fents{$_} for @fents;
+    }
+  }
+  for my $ent (@ents) {
+    next if $ent eq '.' || $ent eq '..';
+    next if $ent =~ /\.new\d*$/;
+    my @s = lstat "$bdir$dir$ent";
+    if (!@s) {
+      warn("$bdir$dir$ent: $!\n");
+      next;
+    }
+    next unless -l _ || -d _ || -f _;
+    my $id = "$s[9]/$s[7]/$s[1]";
+    my $mode = -l _ ? 0x2000 : -f _ ? 0x1000 : 0x0000;
+    $mode |= $s[2] & 07777;
+    my @data = ($id, sprintf("%04x%08x", $mode, $s[9]));
+    if (-d _) {
+      next if $ent eq 'drpmsync' && ($dir eq '' || !$keepdrpmdir);
+      next if @filter_comp && !run_filter_one("$dir$ent/");
+      push @files, [ "$dir$ent", @data ];
+      next if $norecurse;
+      findfiles($bdir, "$dir$ent", $keepdrpmdir);
+    } else {
+      next if @filter_comp && $fents{"$dir$ent"};
+      my @xdata;
+      if ($cache{$id}) {
+	@xdata = @{$cache{$id}};
+	if (@xdata == ($ent =~ /\.[sr]pm$/) ? 3 : 1) {
+	  $cachehits++;
+	  push @files, [ "$dir$ent", @data, @xdata ];
+	  next;
+	}
+      }
+      # print "miss $id ($ent)\n";
+      $cachemisses++;
+      if (-l _) {
+        @xdata = linkinfo("$bdir$dir$ent");
+        next if !@xdata;
+	$cache{$id} = \@xdata;
+	push @files, [ "$dir$ent", @data, @xdata ];
+        next;
+      }
+      local *F;
+      if (!open(F, '<', "$bdir$dir$ent")) {
+	warn("$bdir$dir$ent: $!\n");
+	next;
+      }
+      @s = stat F;
+      if (!@s || ! -f _) {
+	warn("$bdir$dir$ent: $!\n");
+	next;
+      }
+      $id = "$s[9]/$s[7]/$s[1]";
+      @data = ($id, sprintf("1%03x%08x", ($s[2] & 07777), $s[9]));
+      if ($ent =~ /\.[sr]pm$/) {
+	@xdata = rpminfo_f(*F, "$bdir$dir$ent");
+      } else {
+	@xdata = fileinfo_f(*F, "$bdir$dir$ent");
+      }
+      close F;
+      next if !@xdata;
+      $cache{$id} = \@xdata;
+      push @files, [ "$dir$ent", @data, @xdata ];
+    }
+  }
+}
+
+sub readcache {
+  my $cf = shift;
+
+  local *CF;
+  open(CF, '<', $cf) || return;
+  while(<CF>) {
+    chomp;
+    my @s = split(' ');
+    next unless @s == 4 || @s == 2;
+    my $s = shift @s;
+    $cache{$s} = \@s;
+  }
+  close CF;
+}
+
+sub writecache {
+  my $cf = shift;
+
+  local *CF;
+  open(CF, '>', "$cf.new") || die("$cf.new: $!\n");
+  for (@files) {
+    next if @$_ < 4;	# no need to cache dirs
+    if (@$_ > 5) {
+      print CF "$_->[1] $_->[3] $_->[4] $_->[5]\n";
+    } else {
+      print CF "$_->[1] $_->[3]\n";
+    }
+  }
+  close CF;
+  rename("$cf.new", $cf) || die("rename $cf.new $cf: $!\n");
+}
+
+#######################################################################
+# Server stuff
+#######################################################################
+
+sub escape {
+  my $x = shift;
+  $x =~ s/\&/&amp;/g;
+  $x =~ s/\</&lt;/g;
+  $x =~ s/\>/&gt;/g;
+  $x =~ s/\"/&quot;/g;
+  return $x;
+}
+
+sub aescape {
+  my $x = shift;
+  $x =~ s/([\000-\040<>\"#&\+=%[\177-\377])/sprintf("%%%02X",ord($1))/ge;
+  return $x;
+}
+
+sub readfile {
+  my $fn = shift;
+  local *FN;
+  open(FN, '<', $fn) || return ('', "$fn: $!");
+  my $out = '';
+  while ((sysread(FN, $out, 8192, length($out)) || 0) == 8192) {}
+  close FN;
+  return ($out, '');
+}
+
+# server config
+my %trees;
+my %chld;
+my $standalone;
+my $sendlogid;
+my $servername;
+my $serveraddr;
+my $serveruser;
+my $servergroup;
+my $serverlog;
+my $maxclients = 10;
+my $servertmp = '/var/tmp';
+my $serverpidfile;
+
+sub readconfig_server {
+  my $cf = shift;
+
+  my @allow;
+  my @deny;
+  my $no_combine;
+  my $log;
+  my $slog;
+  my $deltadirs;
+  my $maxdeltasize;
+  my $maxdeltasizeabs;
+  my @denymsg;
+  local *CF;
+  die("config not set\n") unless $cf;
+  open(CF, '<', $cf) || die("$cf: $!\n");
+  while(<CF>) {
+    chomp;
+    s/^\s+//;
+    s/\s+$//;
+    next if $_ eq '' || /^#/;
+    my @s = split(' ', $_);
+    my $s0 = lc($s[0]);
+    $s0 =~ s/:$//;
+    my $s1 = @s > 1 ? $s[1] : undef;
+    shift @s;
+    if ($s0 eq 'allow' || $s0 eq 'deny') {
+      for (@s) {
+	if (/^\/(.*)\/$/) {
+	  $_ = $1;
+	  eval { local $::SIG{'__DIE__'}; "" =~ /^$_$/; };
+	  die("$s0: bad regexp: $_\n") if $@;
+	} else {
+	  s/([^a-zA-Z0-9*])/\\$1/g;
+	  s/\*/.*/g;
+	}
+      }
+      if ($s0 eq 'allow') {
+	@allow = @s;
+      } else {
+	@deny = @s;
+      }
+    } elsif ($s0 eq 'denymsg') {
+      if (!@s) {
+        @denymsg = ();
+	next;
+      }
+      if ($s1 =~ /^\/(.*)\/$/) {
+	$s1 = $1;
+	eval { local $::SIG{'__DIE__'}; "" =~ /^$s1$/; };
+	die("$s0: bad regexp: $s1\n") if $@;
+      } else {
+	$s1 =~ s/([^a-zA-Z0-9*])/\\$1/g;
+	$s1 =~ s/\*/.*/g;
+      }
+      shift @s;
+      push @denymsg, [ $s1, join(' ', @s) ];
+    } elsif ($s0 eq 'no_combine') {
+      $no_combine = ($s1 && $s1 =~ /true/i);
+    } elsif ($s0 eq 'log') {
+      $log = $s1;
+    } elsif ($s0 eq 'serverlog') {
+      $slog = $s1;
+    } elsif ($s0 eq 'deltadirs') {
+      $deltadirs = $s1;
+    } elsif ($s0 eq 'deltarpmpath') {
+      my $p = defined($s1) ? "$s1/" : '';
+      $makedeltarpm = "${p}makedeltarpm";
+      $combinedeltarpm = "${p}combinedeltarpm";
+      $fragiso = "${p}fragiso";
+    } elsif ($s0 eq 'maxclients') {
+      $maxclients = $s1 || 1;
+    } elsif ($s0 eq 'servername') {
+      $servername = $s1;
+    } elsif ($s0 eq 'serveraddr') {
+      $serveraddr = $s1;
+    } elsif ($s0 eq 'serveruser') {
+      $serveruser = $s1;
+    } elsif ($s0 eq 'servergroup') {
+      $servergroup = $s1;
+    } elsif ($s0 eq 'pidfile') {
+      $serverpidfile = $s1;
+    } elsif ($s0 eq 'maxdeltasize') {
+      $maxdeltasize = $s1;
+    } elsif ($s0 eq 'maxdeltasizeabs') {
+      $maxdeltasizeabs = $s1;
+    } elsif ($s0 eq 'tree') {
+      die("tree: two arguments required\n") if @s != 2;
+      $trees{$s[0]} = { 'allow' => [ @allow ], 
+			'deny' => [ @deny ], 
+			'denymsg' => [ @denymsg ], 
+			'no_combine' => $no_combine,
+			'maxdeltasize' => $maxdeltasize,
+			'maxdeltasizeabs' => $maxdeltasizeabs,
+			'deltadirs' => $deltadirs,
+			'log' => $log,
+			'root' => $s[1],
+			'id' => $s[0]
+		      };
+    } else {
+      die("$cf: unknown configuration parameter: $s0\n");
+    }
+  }
+  close CF;
+  $serverlog = $slog;
+}
+
+sub gethead {
+  my $h = shift;
+  my $t = shift;
+
+  my ($field, $data);
+  $field = undef;
+  for (split(/[\r\n]+/, $t)) {
+    next if $_ eq '';
+    if (/^[ \t]/) {
+      next unless defined $field;
+      s/^\s*/ /;
+      $h->{$field} .= $_;
+    } else {
+      ($field, $data) = split(/\s*:\s*/, $_, 2);
+      $field =~ tr/A-Z/a-z/;
+      if ($h->{$field} && $h->{$field} ne '') {
+        $h->{$field} = $h->{$field}.','.$data;
+      } else {
+        $h->{$field} = $data;
+      }
+    }
+  }
+}
+
+sub serverlog {
+  my $id = shift;
+  my $str = shift;
+  return unless $serverlog;
+  $str =~ s/\n$//s;
+  my @lt = localtime(time()); 
+  $lt[5] += 1900;
+  $lt[4] += 1;
+  $id = defined($id) ? " [$id]" : '';
+  printf SERVERLOG "%04d-%02d-%02d %02d:%02d:%02d%s: %s\n", @lt[5,4,3,2,1,0], $id, $str;
+}
+
+sub serverdetach {
+  my $pid;
+  local (*SR, *SW);
+  pipe(SR, SW) || die("setsid pipe: $!\n");
+  while (1) {
+    $pid = fork();
+    last if defined $pid;
+    die("fork: $!") if $! != POSIX::EAGAIN;
+    sleep(5);
+  }
+  if ($pid) {
+    close SW;
+    my $dummy = '';
+    sysread(SR, $dummy, 1);
+    exit(0);
+  }
+  POSIX::setsid();
+  close SW;
+  close SR;
+  open(STDIN, "</dev/null");
+  open(STDOUT, ">/dev/null");
+  open(STDERR, ">/dev/null");
+}
+
+sub startserver {
+  my $config = shift;
+  my $nobg = shift;
+
+  # not called from web server, go for standalone
+  $standalone = 1;
+  readconfig_server($config);
+  unlink($serverpidfile) if $serverpidfile;
+  if ($serverlog && !open(SERVERLOG, '>>', $serverlog)) {
+    my $err = "$serverlog: $!\n";
+    undef $serverlog;	# do not log in die() hook
+    die($err);
+  }
+  serverlog(undef, "server start");
+  $servername = '' unless defined $servername;
+  $servername = Net::Domain::hostfqdn().$servername if $servername eq '' || $servername =~ /^:\d+$/;
+  die("need servername for standalone mode\n") unless $servername;
+  if (defined($serveruser) && $serveruser =~ /[^\d]/) {
+    my $uid = getpwnam($serveruser);
+    die("$serveruser: unknown user\n") unless defined $uid;
+    $serveruser = $uid;
+  }
+  if (defined($servergroup) && $servergroup =~ /[^\d]/) {
+    my $gid = getgrnam($servergroup);
+    die("$servergroup: unknown group\n") unless defined $gid;
+    $servergroup = $gid;
+  }
+  my ($servern, $servera, $serverp);
+  ($servern, $serverp) = $servername =~ /^([^\/]+?)(?::(\d+))?$/;
+  die("bad servername: $servername\n") unless $servern;
+  $serverp ||= 80;
+  $servera = INADDR_ANY;
+  if ($serveraddr) {
+    $servera = inet_aton($serveraddr) || die("could not resolv $serveraddr\n");
+  }
+  my $tcpproto = getprotobyname('tcp');
+  socket(MS , PF_INET, SOCK_STREAM, $tcpproto) || die("socket: $!\n");
+  setsockopt(MS, SOL_SOCKET, SO_REUSEADDR, pack("l",1));
+  bind(MS, sockaddr_in($serverp, $servera)) || die "bind: $!\n";
+  listen(MS , 512) || die "listen: $!\n";
+
+  local *SERVERPID;
+  if ($serverpidfile) {
+    open(SERVERPID, '>', $serverpidfile) || die("$serverpidfile: $!\n");
+  }
+
+  if (defined($servergroup)) {
+    ($(, $)) = ($servergroup, $servergroup);
+    die "setgid: $!\n" if $) != $servergroup;
+  }
+  if (defined($serveruser)) {
+    ($<, $>) = ($serveruser, $serveruser);
+    die "setuid: $!\n" if $> != $serveruser;
+  }
+  serverdetach() unless $nobg;
+
+  if ($serverpidfile) {
+    syswrite(SERVERPID, "$$\n");
+    close(SERVERPID) || die("$serverpidfile: $!\n");
+  }
+
+  fcntl(MS, F_SETFL, 0);
+  my $remote_addr;
+  while (1) {
+    $remote_addr = accept(S, MS) || die "accept: $!\n";
+    my $pid;
+    while (1) {
+      $pid = fork();
+      last if defined($pid);
+      sleep(5);
+    }
+    last if $pid == 0;
+    close(S);
+    $chld{$pid} = 1;
+    $remote_addr = inet_ntoa((sockaddr_in($remote_addr))[1]);
+    while(1) {
+      $pid = waitpid(-1, keys %chld < $maxclients ? WNOHANG : 0);
+      delete $chld{$pid} if $pid && $pid > 0;
+      last if !($pid && $pid > 0) && keys %chld < $maxclients;
+    }
+  }
+  close MS;
+  $standalone = 2;
+  setsockopt(S, SOL_SOCKET, SO_KEEPALIVE, pack("l",1));
+  $remote_addr = inet_ntoa((sockaddr_in($remote_addr))[1]);
+  return $remote_addr;
+}
+
+sub parse_cgi {
+  my ($cgip, $query_string) = @_;
+
+  %$cgip = ();
+  my @query_string = split('&', $query_string);
+  while (@query_string) {
+    my ($name, $value) = split('=', shift(@query_string), 2);
+    next unless defined $name && $name ne '';
+    $name  =~ tr/+/ /;
+    $name  =~ s/%([a-fA-F0-9]{2})/chr(hex($1))/ge;
+    if (defined($value)) {
+      $value =~ tr/+/ /;
+      $value =~ s/%([a-fA-F0-9]{2})/chr(hex($1))/ge;
+    }
+    if ($name eq 'filter' || $name eq 'filter_arch') {
+      push @{$cgip->{$name}}, $value;
+    } else {
+      $cgip->{$name} = $value;
+    }
+  }
+}
+
+sub getrequest {
+  my $qu = '';
+  do {
+    die($qu eq '' ? "empty query\n" : "received truncated query\n") if !sysread(S, $qu, 1024, length($qu));
+  } while ($qu !~ /^(.*?)\r?\n/s);
+  my $req = $1;
+  my ($act, $path, $vers, undef) = split(' ', $req, 4);
+  my %headers;
+  die("400 No method name\n") if !$act;
+  if ($vers ne '') {
+    die("501 Bad method: $act\n") if $act ne 'GET' && $act ne 'HEAD' && $act ne 'POST';
+    while ($qu !~ /^(.*?)\r?\n\r?\n(.*)$/s) {
+      die("received truncated query\n") if !sysread(S, $qu, 1024, length($qu));
+    }
+    $qu =~ /^(.*?)\r?\n\r?\n(.*)$/s;
+    $qu = $2;
+    gethead(\%headers, "Request: $1");
+  } elsif ($act ne 'GET') {
+    die("501 Bad method, must be GET\n");
+    $qu = '';
+  }
+  my $query_string = '';
+  if ($path =~ /^(.*?)\?(.*)$/) {
+    $path = $1;
+    $query_string = $2;
+  }
+  if ($act eq 'POST') {
+    $query_string = '';
+    my $cl = $headers{'content-length'};
+    while (length($qu) < $cl) {
+      sysread(S, $qu, $cl - length($qu), length($qu)) || die("400 Truncated body\n");
+    }
+    $query_string = substr($qu, 0, $cl);
+    $qu = substr($qu, $cl);
+  }
+  $path =~ s/%([a-fA-F0-9]{2})/chr(hex($1))/ge;
+  return ($path, $query_string, $headers{'via'} ? 1 : 0);
+}
+
+sub replystream  {
+  local (*FF) = shift;
+  my ($flen, $str, $ctx, @hi) = @_;
+  die("replystream: bad param\n") unless $flen;
+  unshift @hi, "HTTP/1.1 200 OK";
+  push @hi, "Server: drpmsync";
+  push @hi, "Cache-Control: no-cache";
+  push @hi, "Content-length: ".(length($str) + $flen + 32);
+  $str = join("\r\n", @hi)."\r\n\r\n".$str;
+  if ($standalone) {
+    fcntl(S, F_SETFL,O_NONBLOCK);
+    my $dummy = '';
+    1 while sysread(S, $dummy, 1024, 0);
+    fcntl(S, F_SETFL,0);
+  }
+  my $r;
+  while (length($str) || $flen) {
+    if ($flen && length($str) < 16384) {
+      my $d;
+      my $r = sysread(FF, $d, $flen > 8192 ? 8192 : $flen);
+      if (!$r) {
+        die("replystream: read error: $!\n") unless defined $r;
+        die("replystream: unexpected EOF\n");
+      }
+      die("replystream: too much data\n") if $r > $flen;
+      $ctx->add($d);
+      $str .= $d;
+      $flen -= $r;
+      $str .= $ctx->hexdigest if !$flen;
+    }
+    $r = syswrite(S, $str, length($str));
+    die("replystream: write error: $!\n") unless $r;
+    $str = substr($str, $r);
+  }
+}
+
+sub reply {
+  my ($str, @hi) = @_;
+
+  if ($standalone) {
+    if (@hi && $hi[0] =~ /^status: (\d+.*)/i) {
+      $hi[0] = "HTTP/1.1 $1";
+    } else {
+      unshift @hi, "HTTP/1.1 200 OK";
+    }
+  }
+  push @hi, "Server: drpmsync";
+  push @hi, "Cache-Control: no-cache";
+  push @hi, "Content-length: ".length($str);
+  $str = join("\r\n", @hi)."\r\n\r\n$str";
+  if (!$standalone) {
+    print $str;
+    return;
+  }
+  fcntl(S, F_SETFL,O_NONBLOCK);
+  my $dummy = '';
+  1 while sysread(S, $dummy, 1024, 0);
+  fcntl(S, F_SETFL,0);
+  my $l;
+  while (length($str)) {
+    $l = syswrite(S, $str, length($str));
+    die("write error: $!\n") unless $l;
+    $str = substr($str, $l);
+  }
+}
+
+sub reply_err {
+  my ($err, $cgi, $remote_addr) = @_;
+  serverlog($remote_addr, $err) if $serverlog && !$sendlogid;
+  sendlog($err) if $sendlogid;
+  die($err) if $standalone == 1;
+  $err =~ s/\n$//s;
+  if (exists($cgi->{'drpmsync'})) {
+    my $data = 'DRPMSYNC0001ERR 00000000'.sprintf("%08x", length($err)).$err;
+    reply($data, "Content-type: application/octet-stream");
+  } elsif ($err =~ /^(\d+[^\r\n]*)/) {
+    reply("<pre>$err</pre>\n", "Status: $1", "Content-type: text/html");
+  } else {
+    reply("<pre>$err</pre>\n", "Status: 404 Error", "Content-type: text/html");
+  }
+  exit(0);
+}
+
+my $check_access_cache_addr;
+my $check_access_cache_name;
+
+sub check_access {
+  my ($tree, $remote_addr) = @_;
+  my ($remote_name, $access_ok);
+
+  $remote_name = $check_access_cache_name if $check_access_cache_addr && $check_access_cache_addr eq $remote_addr;
+
+  if (@{$tree->{'deny'}}) {
+    if (!$remote_name) {
+      $remote_name = gethostbyaddr(inet_aton($remote_addr), AF_INET);
+      die("could not resolve $remote_addr\n") unless $remote_name;
+      $check_access_cache_addr = $remote_addr;
+      $check_access_cache_name = $remote_name;
+    }
+    for my $deny (@{$tree->{'deny'}}) {
+      if ($deny =~ /^!/) {
+	my $d1 = substr($deny, 1);
+	last if $remote_name =~ /^$d1$/i;
+	last if $remote_addr =~ /^$d1$/i;
+      }
+      goto denied if $remote_name =~ /^$deny$/i;
+      goto denied if $remote_addr =~ /^$deny$/i;
+    }
+  }
+  for my $allow (@{$tree->{'allow'}}) {
+    last if $allow =~ /^!/;
+    return if $remote_addr =~ /^$allow$/i;
+  }
+  if (!$remote_name) {
+    $remote_name = gethostbyaddr(inet_aton($remote_addr), AF_INET);
+    die("could not resolve $remote_addr\n") unless $remote_name;
+    $check_access_cache_addr = $remote_addr;
+    $check_access_cache_name = $remote_name;
+  }
+  for my $allow (@{$tree->{'allow'}}) {
+    if ($allow =~ /^!/) {
+      my $a1 = substr($allow, 1);
+      last if $remote_name =~ /^$a1$/i;
+      last if $remote_addr =~ /^$a1$/i;
+    }
+    return if $remote_addr =~ /^$allow$/i;
+    return if $remote_name =~ /^$allow$/i;
+  }
+denied:
+  my $denymsg = "access denied [%h]";
+  for my $dmsg (@{$tree->{'denymsg'}}) {
+    if ($remote_name =~ /^$dmsg->[0]$/i || $remote_addr =~ /^$dmsg->[0]$/i) {
+      $denymsg = $dmsg->[1];
+      last;
+    }
+  }
+  $denymsg =~ s/%h/$remote_addr/g;
+  $denymsg =~ s/%n/$remote_name/g;
+  die("$denymsg\n");
+}
+
+sub sendlog {
+  my $str = shift;
+  return unless $sendlogid;
+  $str =~ s/\n$//s;
+  my @lt = localtime(time()); 
+  $lt[5] += 1900;
+  $lt[4] += 1;
+  printf SENDLOG "%05d %04d-%02d-%02d %02d:%02d:%02d %s: %s\n", $$, @lt[5,4,3,2,1,0], $sendlogid, $str;
+}
+
+sub solve {
+  my ($have2, $info2, @dirs) = @_;
+
+  my @avail;
+  for my $dir (@dirs) {
+    if (opendir(D, $dir)) {
+      push @avail, map {"$dir/$_"} grep {/^[0-9a-f]{96}$/} readdir(D);
+      closedir D;
+    }
+  }
+  return () unless @avail;
+  my $gotone;
+  for (@avail) {
+    if ($have2->{substr($_, -96, 32)}) {
+      $gotone = 1;
+      last;
+    }
+  }
+  return () unless $gotone;
+  my @chains = ([$info2]);
+  my %avail;
+  push @{$avail{substr($_, -32, 32)}}, $_ for @avail;
+  while (@chains && @{$chains[0]} <= @avail) {
+    for my $pos (splice @chains) {
+      for my $a (@{$avail{$pos->[0]}}) {
+	my @n = (@$pos, $a);
+	$n[0] = substr($a, -96, 32);
+	if ($have2->{$n[0]}) {
+	  shift @n;
+	  return reverse @n;
+	}
+	push @chains, \@n;
+      }
+    }
+  }
+  return ();
+}
+
+sub extractrpm {
+  local *F = shift;
+  my ($o, $l) = @_;
+  local *F2;
+  tmpopen(*F2, $servertmp);
+  defined(sysseek(F, $o, 0)) || die("extractrpm: sysseek: $!\n");
+  my $buf;
+  while ($l > 0) {
+    my $r = sysread(F, $buf, $l > 8192 ? 8192 : $l);
+    if (!$r) {
+      die("extractrpm: read error: $!\n") unless defined $r;
+      die("extractrpm: unexpected EOF\n");
+    }
+    die("extractrpm: read too much data\n") if $r > $l;
+    die("extractrpm: write error: $!\n") if (syswrite(F2, $buf) || 0) != $r;
+    $l -= $r;
+  }
+  close(F);
+  seek(F2, 0, 0);
+  sysseek(F2, 0, 0);
+  open(F, "<&F2") || die("extractrpm: dup: $!\n");
+  close(F2);
+}
+
+sub hexit {
+  my $v = shift;
+  if ($v >= 4294967295) {
+    my $v2 = int($v / 4294967296);
+    return sprintf("FFFFFFFF%02x%08x", $v2, $v - 4294967296 * $v2);
+  } else {
+    return sprintf("%08x", $v);
+  }
+}
+
+my $deltadirscache;
+my $deltadirscacheid;
+
+sub getdeltadirs {
+  my ($ddconfig, $path) = @_;
+
+  my @dirs;
+  if ($deltadirscache) {
+    my @ddstat = stat($ddconfig);
+    undef $deltadirscache if !@ddstat || "$ddstat[9]/$ddstat[7]/$ddstat[1]" ne $deltadirscacheid;
+  }
+  if (!$deltadirscache) {
+    local *DD;
+    my @ddc;
+    if (open(DD, '<', $ddconfig)) {
+      while(<DD>) {
+        chomp;
+	next if /^\s*$/;
+	if (@ddc && /^\s*\+\s*(.*)/) {
+	  push @{$ddc[-1]}, split(' ', $1);
+	} else {
+	  push @ddc, [ split(' ', $_) ];
+	}
+      }
+      my @ddstat = stat(DD);
+      close DD;
+      $deltadirscache = \@ddc;
+      $deltadirscacheid = "$ddstat[9]/$ddstat[7]/$ddstat[1]";
+    }
+  }
+  if ($deltadirscache) {
+    for my $dd (@$deltadirscache) {
+      my @dd = @$dd;
+      my $ddre = shift @dd;
+      eval {
+        push @dirs, @dd if $path =~ /$ddre/;
+      };
+    }
+  }
+  return @dirs;
+}
+
+sub serve_request {
+  my ($cgi, $path_info, $script_name, $remote_addr, $keep_ok) = @_;
+
+  my $tree;
+  $path_info = '' unless defined $path_info;
+  die("invalid path\n") if $path_info =~ /\/(\.|\.\.)?\//;
+  die("invalid path\n") if $path_info =~ /\/(\.|\.\.)$/;
+  die("invalid path\n") if "$path_info/" =~ /(\.|\.\.)\//;
+  die("invalid path\n") if $path_info ne '' && ($path_info !~ /^\//);
+  die("$script_name not exported\n") unless $trees{$script_name};
+
+  my $sendlog = $trees{$script_name}->{'log'};
+  if ($tree && $tree->{'log'} && (!$sendlog || $tree->{'log'} ne $sendlog)) {
+      close(SENDLOG);
+      undef $sendlogid;
+  }
+  if ($sendlog && (!$tree || !$tree->{'log'} || $tree->{'log'} ne $sendlog)) {
+    open(SENDLOG, '>>', $sendlog) || die("$sendlog: $!\n");
+    select(SENDLOG);
+    $| = 1;
+    select(STDOUT);
+    $sendlogid = "[$remote_addr] $trees{$script_name}->{'id'}";
+  }
+  $tree = $trees{$script_name};
+  check_access($tree, $remote_addr);
+
+  my $spath_info = $path_info;
+  $spath_info =~ s/^\///;
+
+  my $root = $tree->{'root'};
+  die("$root: $!\n") unless -d $root;
+
+  my $replyid = $keep_ok ? 'DRPMSYNK' : 'DRPMSYNC';
+
+  if ($path_info =~ /(.*)\/drpmsync\/closesock$/ && exists $cgi->{'drpmsync'}) {
+    my $croot = $1;
+    sendlog(". $croot bye");
+    close(S);
+    exit(0);
+  }
+
+  if ($path_info =~ /^(.*)\/drpmsync\/contents$/) {
+    my $croot = $1;
+    die("$croot: does not exist\n") unless -e "$root$croot";
+    die("$croot: not a directory\n") unless -d "$root$croot";
+    sendlog("# $croot contents request");
+    my $ti = time();
+    readcache("$root$croot/drpmsync/cache");
+    @files = ();
+    $cachehits = $cachemisses = 0;
+    @filter_comp = compile_filter(@{$cgi->{'filter'} || []});
+    @filter_arch_comp = compile_filter(@{$cgi->{'filter_arch'} || []});
+    findfiles("$root$croot", '', 0, exists($cgi->{'norecurse'}) ? 1 : 0);
+    filelist_apply_filter_arch(\@files) if @filter_arch_comp;
+    %cache = ();
+    $ti = time() - $ti;
+    my ($stamp1, $stamp2);
+    $stamp1 = $stamp2 = sprintf("%08x", time());
+    if (open(STAMP, '<', "$root$croot/drpmsync/timestamp")) {
+      my $s = '';
+      if ((sysread(STAMP, $s, 16) || 0) == 16 && $s !~ /[^0-9a-f]/) {
+        $stamp1 = substr($s, 0, 8);
+        $stamp2 = substr($s, 8, 8);
+      }
+      close STAMP;
+    }
+    my $data = '';
+    if (!exists $cgi->{'drpmsync'}) {
+      for (@files) {
+        my @l = @$_;
+        $l[0] = aescape($l[0]);
+        $l[5] = aescape($l[5]) if @l > 5;
+        splice(@l, 1, 1);
+        $data .= join(' ', @l)."\n";
+      }
+      sendlog("h $croot contents ($cachehits/$cachemisses/$ti)");
+      reply($data, "Content-type: text/plain");
+      exit(0);
+    }
+    $data = pack('H*', "$stamp1$stamp2");
+    $data = pack("Nw/a*w/a*", scalar(@files), $tree->{'id'}, $data);
+    for (@files) {
+      my @l = @$_;
+      my $b;
+      if (@l > 5) {
+        $b = pack('H*', "$l[2]$l[3]$l[4]").$l[5];
+      } elsif (@l > 3) {
+        $b = pack('H*', "$l[2]$l[3]");
+      } else {
+        $b = pack('H*', $l[2]);
+      }
+      $data .= pack("w/a*w/a*", $l[0], $b);
+    }
+    @files = ();
+    my $dataid = 'SYNC';
+    if ($have_zlib && exists($cgi->{'zlib'})) {
+      $data = Compress::Zlib::compress($data);
+      $dataid = 'SYNZ';
+      sendlog("z $croot contents ($cachehits/$cachemisses/$ti)");
+    } else {
+      sendlog("f $croot contents ($cachehits/$cachemisses/$ti)");
+    }
+    $data = sprintf("1%03x%08x", 0644, time()).$data;
+    $data = "${replyid}0001${dataid}00000000".sprintf("%08x", length($data)).$data.Digest::MD5::md5_hex($data);
+    reply($data, "Content-type: application/octet-stream");
+    return;
+  }
+
+  my @s = lstat("$root$path_info");
+
+  if (!exists($cgi->{'drpmsync'})) {
+    die("$spath_info: $!\n") unless @s;
+    if (! -d _) {
+      die("$spath_info: bad file type\n") unless -f _;
+      sendlog("h $path_info");
+      open(F, '<', "$root$path_info") || die("$spath_info: $!\n");
+      my $c = '';
+      while ((sysread(F, $c, 4096, length($c)) || 0) == 4096) {}
+      close F;
+      my $ct = 'text/plain';
+      if ($spath_info =~ /\.(gz|rpm|spm|bz2|tar|tgz|jpg|jpeg|gif|png|pdf)$/) {
+	$ct = 'application/octet-stream';
+      }
+      reply($c, "Content-type: $ct");
+      exit(0);
+    }
+    if (($path_info !~ s/\/$//)) {
+      if ($standalone) {
+	reply("The document has moved", "Status: 302 Found", "Content-type: text/html", "Location: http://$servername$tree->{'id'}$path_info/");
+      } else {
+	reply("The document has moved", "Status: 302 Found", "Content-type: text/html", "Location: http://$ENV{'SERVER_NAME'}$tree->{'id'}$path_info/");
+      }
+      exit(0);
+    }
+    sendlog("h $path_info");
+    opendir(DIR, "$root$path_info") || die("$root$path_info: $!\n");
+    my @ents = sort readdir(DIR);
+    closedir DIR;
+    @ents = grep {$_ ne '.' && $_ ne '..'} @ents;
+    unshift @ents, '.', '..';
+    my $data = "<pre>\n";
+    for my $ent (@ents) {
+      @s = lstat("$root$path_info/$ent");
+      if (!@s) {
+	$data .= escape("$ent: $!\n");
+	next;
+      }
+      my $ent2 = '';
+      my $info = '?';
+      $info = 'c' if -c _;
+      $info = 'b' if -b _;
+      $info = '-' if -f _;
+      $info = 'd' if -d _;
+      if (-l _) {
+	$info = 'l';
+	$ent2 = readlink("$root$path_info/$ent");
+	die("$root$path_info/$ent: $!") unless defined $ent2;
+	$ent2 = escape(" -> $ent2");
+      }
+      my $mode = $s[2] & 0777;
+      for (split('', 'rwxrwxrwx')) {
+	$info .= $mode & 0400 ? $_ : '-';
+	$mode *= 2;
+      }
+      my @lt = localtime($s[9]);
+      $lt[4] += 1;
+      $lt[5] += 1900;
+      $info = sprintf("%s %4d root root %8d %04d-%02d-%02d %02d:%02d:%02d", $info, $s[3], $s[7], @lt[5, 4, 3, 2, 1, 0]);
+      $info = escape($info);
+      my $ne = "$path_info/$ent";
+      $ne = $path_info if $ent eq '.';
+      if ($ent eq '..') {
+	$ne = $path_info;
+	$ne =~ s/[^\/]+$//;
+	$ne =~ s/\/$//;
+      }
+      if ((-d _) && ! (-l _)) {
+	$ent = "<a href=\"".aescape("$script_name$ne/")."\">".escape("$ent")."</a>$ent2";
+      } elsif ((-f _) && ! (-l _)) {
+	$ent = "<a href=\"".aescape("$script_name$ne")."\">".escape("$ent")."</a>$ent2";
+      } else {
+	$ent = escape("$ent").$ent2;
+      }
+      $data .= "$info $ent\n";
+    }
+    $data .= "</pre>\n";
+    reply($data, "Content-type: text/html");
+    exit(0);
+  }
+
+  if (!@s) {
+    sendlog("- $path_info");
+    my $data = "${replyid}0001GONE".sprintf("%08x", length($spath_info)).'00000000'.$spath_info;
+    reply($data, "Content-type: application/octet-stream");
+    return;
+  }
+
+  if (-d _) {
+    # oops, this is bad, the file is now a directory
+    # send GONE so it will get removed
+    sendlog("X $path_info");
+    my $data = "${replyid}0001GONE".sprintf("%08x", length($spath_info)).'00000000'.$spath_info;
+    reply($data, "Content-type: application/octet-stream");
+    return;
+  }
+
+  if (-l _) {
+    sendlog("f $path_info");
+    my $lc = readlink("$root$path_info");
+    die("readlink: $!\n") unless defined($lc);
+    $lc = sprintf("2%03x%08x", $s[2] & 07777, $s[9]).$lc;
+    my $data = "${replyid}0001FILE".sprintf("%08x%08x", length($spath_info), length($lc)).$spath_info.$lc.Digest::MD5::md5_hex($lc);
+    reply($data, "Content-type: application/octet-stream");
+    return;
+  }
+
+  die("$spath_info: bad file type\n") unless -f _;
+  open(F, '<', "$root$path_info") || die("$spath_info: $!\n");
+
+  my $extracto = 0;
+  my $extractl;
+
+  if ((exists($cgi->{'fiso'}) || exists($cgi->{'extract'})) && ($spath_info =~ /(?<!\.delta)\.iso$/i)) {
+    if (!$cgi->{'extract'}) {
+      tmpopen(*F2, $servertmp);
+      my (undef, $err) = runprg(*F, *F2, $fragiso, 'make', '-', '-');
+      die("fragiso make failed: $err\n") if $err;
+      close F;
+      sysseek(F2, 0, 0);	# currently at EOF
+      sendlog("i $path_info");
+      my $flen = -s F2;
+      my $ctx = Digest::MD5->new;
+      my $data = sprintf("1%03x%08x", $s[2] & 07777, $s[9]);
+      $ctx->add($data);
+      $data = "${replyid}0001FISO".sprintf("%08x", length($spath_info)).hexit(length($data) + $flen).$spath_info.$data;
+      replystream(*F2, $flen, $data, $ctx, "Content-type: application/octet-stream");
+      close F2;
+      return;
+    } else {
+      die("bad extract: $cgi->{'extract'}\n") unless $cgi->{'extract'} =~ /^([0-9a-fA-F]{2})([0-9a-fA-F]{8}):([0-9a-fA-F]{8})$/;
+      # always fits in perl's floats
+      $extracto = hex($1) * 4294967296 + hex($2);
+      $extractl = hex($3);
+      defined(sysseek(F, $extracto, 0)) || die("seek error: $!\n");
+      $path_info .= "\@$cgi->{'extract'}";
+    }
+  } elsif ($spath_info !~ /\.[sr]pm$/) {
+    my $flen = $s[7];
+    my $data = sprintf("1%03x%08x", $s[2] & 07777, $s[9]);
+    if ($s[7] >= 67108864) {
+      sendlog("f $path_info");
+      my $ctx = Digest::MD5->new;
+      $ctx->add($data);
+      $data = "${replyid}0001FILE".sprintf("%08x", length($spath_info)).hexit(length($data) + $flen).$spath_info.$data;
+      replystream(*F, $flen, $data, $ctx, "Content-type: application/octet-stream");
+      return;
+    }
+    while ((sysread(F, $data, 4096, length($data)) || 0) == 4096) {}
+    close F;
+    my $dataid = 'FILE';
+    if (length($data) >= 12 + 64 && $have_zlib && exists($cgi->{'zlib'}) && substr($data, 12, 2) ne "\037\213" && substr($data, 12, 2) ne "BZ") {
+      $data = substr($data, 0, 12).Compress::Zlib::compress(substr($data, 12));
+      $dataid = 'FILZ';
+      sendlog("z $path_info");
+    } else {
+      sendlog("f $path_info");
+    }
+    $data = "${replyid}0001$dataid".sprintf("%08x%08x", length($spath_info), length($data)).$spath_info.$data.Digest::MD5::md5_hex($data);
+    reply($data, "Content-type: application/octet-stream");
+    return;
+  }
+
+  my $deltadata = '';
+  my $deltaintro = '';
+  my $deltanum = 0;
+  my $sendrpm = exists($cgi->{'withrpm'}) ? 1 : 0;
+  my $key = '';
+  if ($cgi->{'have'}) {
+    my %have2;
+    for (split(',', $cgi->{'havealso'} ? "$cgi->{'have'},$cgi->{'havealso'}" : $cgi->{'have'})) {
+      die("bad have parameter\n") if (length($_) != 32 && length($_) != 64) || /[^0-9a-f]/;
+      $have2{substr($_, -32, 32)} = 1;
+    }
+    my @info = rpminfo_f(*F, $spath_info);
+    die("$spath_info: bad info\n") unless @info;
+    # seek needed because of perl's autoflush when forking
+    seek(F, $extracto, 0);
+    # only sysread after this!
+    defined(sysseek(F, $extracto, 0)) || die("sysseek: $!\n");
+    $path_info .= " ($info[2])" if $extracto;
+    my $info = $info[0];
+    my $info1 = substr($info, 0, 32);
+    my $info2 = substr($info, 32, 32);
+    if ($have2{$info2}) {
+      if ($extracto) {
+	# switch to real rpm
+        extractrpm(*F, $extracto, $extractl);
+	$extracto = 0;
+	$extractl = undef;
+      }
+      # identical payload, create sign only delta
+      # sendlog("$path_info: makedeltarpm sign only");
+      my ($out, $err) = runprg(*F, undef, $makedeltarpm, '-u', '-r', '-', '-');
+      die("makedeltarpm failed: $err\n") if $err;
+      $deltaintro .= sprintf("1%03x%08x$info2$info1$info2%08x", $s[2] & 07777, $s[9], length($out));
+      $deltadata .= $out;
+      $deltanum++;
+      $key = 's';
+      $sendrpm = 0;	# no need to send full rpm in this case
+    } elsif (!exists($cgi->{'nocomplexdelta'})) {
+      # ok, lets see if we can build a chain from info2 back to have2
+      my $dpn = $info[2];
+  lost_delta:
+      $key = '';
+      $deltadata = '';
+      $deltaintro = '';
+      $deltanum = 0;
+
+      my $deltadir = "$root$path_info";
+      if ($path_info ne '') {
+        $deltadir =~ s/[^\/]+$//;
+        $deltadir =~ s/\/$//;
+        while ($deltadir ne $root) {
+	  last if -d "$deltadir/drpmsync/deltas";
+          $deltadir =~ s/[^\/]+$//;
+          $deltadir =~ s/\/$//;
+	}
+      }
+      $deltadir = "$deltadir/drpmsync/deltas/$dpn";
+      my @solution;
+      if (length($cgi->{'have'}) == 64 && -f "$deltadir/$cgi->{'have'}$info2") {
+	@solution = ("$deltadir/$cgi->{'have'}$info2");
+      } else {
+        my @deltadirs = ( $deltadir );
+        push @deltadirs, map {"$_/$dpn"} getdeltadirs($tree->{'deltadirs'}, $spath_info) if $tree->{'deltadirs'};
+        @solution = solve(\%have2, $info2, @deltadirs);
+      }
+      my $dsize = 0;
+      for (@solution) {
+	goto lost_delta if ! -e $_;
+	die("bad deltarpm: $_\n") if ! -f _;
+        if (!exists($cgi->{'uncombined'}) && !$tree->{'no_combine'}) {
+          $dsize = -s _ if (-s _) > $dsize;
+	} else {
+          $dsize += -s _;
+	}
+      }
+      my $maxdeltasize = $cgi->{'maxdeltasize'};
+      $maxdeltasize = $tree->{'maxdeltasize'} if defined($tree->{'maxdeltasize'}) && (!defined($maxdeltasize) || $maxdeltasize > $tree->{'maxdeltasize'});
+      if (defined($maxdeltasize)) {
+	my $flen = -s F;
+	$flen = $extractl if defined $extractl;
+        @solution = () if $dsize >= ($flen * $maxdeltasize) / 100;
+      }
+      my $maxdeltasizeabs = $cgi->{'maxdeltasizeabs'};
+      $maxdeltasizeabs = $tree->{'maxdeltasizeabs'} if defined($tree->{'maxdeltasizeabs'}) && (!defined($maxdeltasizeabs) || $maxdeltasizeabs > $tree->{'maxdeltasizeabs'});
+      @solution = () if defined($maxdeltasizeabs) && $dsize >= $maxdeltasizeabs;
+      if (@solution) {
+	# sendlog("$path_info: solution @solution");
+	my @combine = ();
+        $key = scalar(@solution) if @solution > 1;
+        $key .= 'd';
+	for my $dn (@solution) {
+	  push @combine, $dn;
+	  next if @combine < @solution && !exists($cgi->{'uncombined'}) && !$tree->{'no_combine'};
+	  my @ds = stat($combine[0]);
+	  goto lost_delta if !@ds || ! -f _;
+	  my ($out, $err);
+	  if ($dn eq $solution[-1] && substr($dn, -64, 32) ne $info1) {
+	    # sendlog("$path_info: combinedeltarpm -S @combine");
+	    if ($extracto) {
+	      # switch to real rpm
+	      extractrpm(*F, $extracto, $extractl);
+	      $extracto = 0;
+	      $extractl = undef;
+	    }
+	    ($out, $err) = runprg(*F, undef, $combinedeltarpm, '-S', '-', @combine, '-');
+	    defined(sysseek(F, 0, 0)) || die("sysseek: $!\n");
+	    substr($combine[-1], -64, 32) = $info1 unless $err;
+	    $key .= 's';
+	  } elsif (@combine > 1) {
+	    # sendlog("$path_info: combinedeltarpm @combine");
+	    ($out, $err) = runprg(undef, undef, $combinedeltarpm, @combine, '-');
+	  } else {
+	    # sendlog("$path_info: readfile @combine");
+	    ($out, $err) = readfile($dn);
+	  }
+	  if ($err) {
+	    goto lost_delta if grep {! -f $_} @combine;
+	    $err =~ s/\n$//s;
+	    sendlog("! $path_info $err");
+	    %have2 = ();	# try without deltas
+	    goto lost_delta;
+	  }
+	  $deltaintro .= sprintf("1%03x%08x".substr($combine[0], -96, 32).substr($combine[-1], -64, 64)."%08x", $ds[2] & 07777, $ds[9], length($out));
+	  $deltadata .= $out;
+	  $deltanum++;
+	  @combine = ();
+	}
+        $key .= $deltanum if $deltanum != 1;
+      }
+    }
+  }
+  if (exists($cgi->{'deltaonly'}) && !$deltanum) {
+    sendlog("O $path_info");
+    my $data = "${replyid}0001NODR".sprintf("%08x", length($spath_info)).'00000000'.$spath_info;
+    reply($data, "Content-type: application/octet-stream");
+    return;
+  }
+  $sendrpm = 1 if !$deltanum;
+  $key .= 'r' if $sendrpm;
+  $key = '?' if $key eq '';
+  sendlog("$key $path_info");
+  if ($sendrpm) {
+    my $flen = -s F;
+    $flen = $extractl if defined $extractl;
+    if ($flen > 100000 || defined($extractl)) {
+      my $data = sprintf("1%03x%08x", $s[2] & 07777, $s[9]);
+      $data .= sprintf("%08x%08x", $deltanum, $sendrpm).$deltaintro.$deltadata;
+      my $ctx = Digest::MD5->new;
+      $ctx->add($data);
+      $data = "${replyid}0001RPM ".sprintf("%08x%08x", length($spath_info), length($data) + $flen).$spath_info.$data;
+      replystream(*F, $flen, $data, $ctx, "Content-type: application/octet-stream");
+      close F;
+      return;
+    }
+  }
+  my $rdata = '';
+  if ($sendrpm) {
+    while ((sysread(F, $rdata, 4096, length($rdata)) || 0) == 4096) {}
+  }
+  my $data = sprintf("1%03x%08x", $s[2] & 07777, $s[9]);
+  $data .= sprintf("%08x%08x", $deltanum, $sendrpm).$deltaintro.$deltadata.$rdata;
+  undef $deltadata;
+  $data = "${replyid}0001RPM ".sprintf("%08x%08x", length($spath_info), length($data)).$spath_info.$data.Digest::MD5::md5_hex($data);
+  reply($data, "Content-type: application/octet-stream");
+  close F;
+  undef $data;
+}
+
+if ($::ENV{'REQUEST_METHOD'} || (@ARGV && ($ARGV[0] eq '-s' || $ARGV[0] eq '-S'))) {
+  # server mode
+  my %cgi;
+  my $request_method = $::ENV{'REQUEST_METHOD'};
+  if ($request_method) {
+    my $query_string = $::ENV{'QUERY_STRING'};
+    my $script_name = $::ENV{'SCRIPT_NAME'};
+    my $path_info = $::ENV{'PATH_INFO'};
+    my $remote_addr = $::ENV{'REMOTE_ADDR'};
+    if ($request_method eq 'POST') {
+      $query_string = '';
+      read(STDIN, $query_string, 0 + $::ENV{'CONTENT_LENGTH'});
+    }
+    eval {
+      parse_cgi(\%cgi, $query_string);
+      my $config = $::ENV{'DRPMSYNC_CONFIG'};
+      readconfig_server($config);
+      serve_request(\%cgi, $path_info, $script_name, $remote_addr, 0);
+      exit(0);
+    };
+    reply_err($@, \%cgi, $remote_addr);
+    exit(0);
+  }
+  my $remote_addr = startserver($ARGV[1], $ARGV[0] eq '-S' ? 1 : 0);
+  eval {
+    while (1) {
+      %cgi = ();
+      my ($path, $query_string, $has_via) = getrequest(\%cgi);
+      $request_method = 'GET';
+      parse_cgi(\%cgi, $query_string);
+      my $keep_ok = !$has_via && exists($cgi{'drpmsync'});
+      my @mtrees = grep {$path eq $_->{'id'} || substr($path, 0, length($_->{'id'}) + 1) eq "$_->{'id'}/" } sort {length($b->{'id'}) <=> length($a->{'id'})} values %trees;
+      die("not exported\n") unless @mtrees;
+      my $script_name = $mtrees[0]->{'id'};
+      my $path_info = substr($path, length($script_name));
+      serve_request(\%cgi, $path_info, $script_name, $remote_addr, $keep_ok);
+      exit(0) unless $keep_ok;
+    }
+  };
+  reply_err($@, \%cgi, $remote_addr);
+  exit(0);
+}
+
+
+#######################################################################
+# Client code
+#######################################################################
+
+my @config_source;
+my $config_generate_deltas;
+my $config_keep_deltas;
+my $config_keep_uncombined;
+my $config_always_get_rpm;
+my @config_generate_delta_compression;
+my $config_recvlog;
+my $config_delta_max_age;
+my $config_repo;
+my $config_timeout;
+my @config_filter;
+my @config_filter_arch;
+
+my $syncport;
+my $syncaddr;
+my $syncproto;
+my $syncuser;
+my $syncpassword;
+my $syncurl;
+my $syncroot;
+my $esyncroot;
+my $synctree = '';
+my $synchost = Net::Domain::hostfqdn();
+
+my $newstamp1;
+my $newstamp2;
+
+my $runningjob;
+
+sub readconfig_client {
+  my $cf = shift;
+  local *CF;
+  open(CF, '<', $cf) || die("$cf: $!\n");
+  while (<CF>) {
+    chomp;
+    s/^\s+//;
+    s/\s+$//;
+    next if $_ eq '' || /^#/;
+    my @s = split(' ', $_);
+    $s[0] = lc($s[0]);
+    if ($s[0] eq 'source:') {
+      shift @s;
+      @config_source = @s;
+    } elsif ($s[0] eq 'generate_deltas:') {
+      $config_generate_deltas = ($s[1] && $s[1] =~ /true/i);
+    } elsif ($s[0] eq 'generate_delta_compression:') {
+      @config_generate_delta_compression = ();
+      @config_generate_delta_compression = ('-z', $s[1]) if $s[1];
+    } elsif ($s[0] eq 'keep_deltas:') {
+      $config_keep_deltas = ($s[1] && $s[1] =~ /true/i);
+    } elsif ($s[0] eq 'keep_uncombined:') {
+      $config_keep_uncombined = ($s[1] && $s[1] =~ /true/i);
+    } elsif ($s[0] eq 'always_get_rpm:') {
+      $config_always_get_rpm = ($s[1] && $s[1] =~ /true/i);
+    } elsif ($s[0] eq 'delta_max_age:') {
+      $config_delta_max_age = @s > 1 ? $s[1] : undef;
+    } elsif ($s[0] eq 'timeout:') {
+      $config_timeout = @s > 1 ? $s[1] : undef;
+    } elsif ($s[0] eq 'deltarpmpath:') {
+      my $p = defined($s[1]) ? "$s[1]/" : '';
+      $makedeltarpm = "${p}makedeltarpm";
+      $combinedeltarpm = "${p}combinedeltarpm";
+      $applydeltarpm = "${p}applydeltarpm";
+      $fragiso = "${p}fragiso";
+    } elsif ($s[0] eq 'log:') {
+      $config_recvlog = @s > 1 ? $s[1] : undef;
+    } elsif ($s[0] eq 'repo:') {
+      $config_repo = @s > 1 ? $s[1] : undef;
+    } elsif ($s[0] eq 'exclude:') {
+      push @config_filter, map {"-$_"} @s;
+    } elsif ($s[0] eq 'include:') {
+      push @config_filter, map {"+$_"} @s;
+    } elsif ($s[0] eq 'exclude_arch:') {
+      push @config_filter_arch, map {"-$_"} @s;
+    } elsif ($s[0] eq 'include_arch:') {
+      push @config_filter_arch, map {"+$_"} @s;
+    } else {
+      $s[0] =~ s/:$//;
+      die("$cf: unknown configuration parameter: $s[0]\n");
+    }
+  }
+  $config_keep_deltas ||= $config_generate_deltas;
+  $config_keep_deltas ||= $config_keep_uncombined;
+  close CF;
+}
+
+#######################################################################
+
+sub mkdir_p {
+  my $dir = shift;
+  return if -d $dir;
+  mkdir_p($1) if $dir =~ /^(.*)\//;
+  mkdir($dir, 0777) || die("mkdir: $dir: $!\n");
+}
+
+#######################################################################
+
+sub toiso {
+  my @lt = localtime($_[0]);
+  $lt[5] += 1900;
+  $lt[4] += 1;
+  return sprintf "%04d-%02d-%02d %02d:%02d:%02d", @lt[5,4,3,2,1,0];
+}
+
+#######################################################################
+
+sub recvlog {
+  my $str = shift;
+
+  return unless $config_recvlog;
+  my @lt = localtime(time());
+  $lt[5] += 1900;
+  $lt[4] += 1;
+  printf RECVLOG "%04d-%02d-%02d %02d:%02d:%02d %s\n", @lt[5,4,3,2,1,0], $str;
+}
+
+sub recvlog_print {
+  my $str = shift;
+  print "$str\n";
+  recvlog($str);
+}
+
+#######################################################################
+
+sub makedelta {
+  my ($from, $to, $drpm) = @_;
+  # print "makedeltarpm $from $to\n";
+  if (substr($drpm, -96, 32) eq substr($drpm, -32, 32)) {
+    system($makedeltarpm, @config_generate_delta_compression, '-u', '-r', $to, $drpm) && die("makedeltarpm failed\n");
+  } else {
+    system($makedeltarpm, @config_generate_delta_compression, '-r', $from, $to, $drpm) && die("makedeltarpm failed\n");
+  }
+  die("makedeltarpm did not create delta\n") unless -s $drpm;
+  return $drpm;
+}
+
+sub applydeltas {
+  my ($job, $from, $to, $extractoff, @deltas) = @_;
+  my $dn = $deltas[0];
+  if (@deltas > 1) {
+    my $ddir = $deltas[0];
+    $ddir =~ s/\/[^\/]+$//;
+    my $d1 = $deltas[0];
+    my $d2 = $deltas[-1];
+    my @d1s = stat($d1);
+    die("$d1: $!\n") if !@d1s;
+    $d1 =~ s/.*\///;
+    $d2 =~ s/.*\///;
+    $dn = "$ddir/".substr($d1, 0, 32).substr($d2, 32, 64);
+    die("combined delta already exists?\n") if -f $dn;
+    # print "combinedeltarpm @deltas\n";
+    if (system($combinedeltarpm, @deltas, $dn) || ! -s $dn) {
+      recvlog_print("! combinedeltarpm @deltas $dn failed");
+      unlink @deltas;
+      return ();
+    }
+    utime($d1s[9], $d1s[9], $dn);
+  }
+  # print "applydeltarpm $from $dn\n";
+  my $err;
+  if ($extractoff) {
+    local *EXTR;
+    if (!open(EXTR, '+<', $to)) {
+      recvlog_print("! open $to failed: $!");
+      unlink(@deltas);
+      return ();
+    }
+    if (!defined(sysseek(EXTR, $extractoff, 0))) {
+      recvlog_print("! sysseek $to failed: $!");
+      unlink(@deltas);
+      return ();
+    }
+    (undef, $err) = runprg_job($job, undef, *EXTR, $applydeltarpm, '-r', $from, $dn, '-');
+    close(EXTR);
+  } else {
+    (undef, $err) = runprg_job($job, undef, undef, $applydeltarpm, '-r', $from, $dn, $to);
+  }
+  if ($err) {
+    recvlog_print("! applydeltarpm -r $from $dn $to failed: $err");
+    unlink(@deltas);
+    return ();
+  }
+  if ($job) {
+    $job->{'applydeltas'} = [$dn, @deltas];
+    return ($job);
+  }
+  if ($config_keep_uncombined || @deltas <= 1) {
+    if (@deltas > 1) {
+      unlink($dn) || die("unlink $dn: $!\n");
+    }
+    return @deltas;
+  }
+  for my $d (@deltas) {
+    unlink($d) || die("unlink $d: $!\n");
+  }
+  return ($dn);
+}
+
+sub applydeltas_finish {
+  my ($job) = @_;
+  die("job not running\n") unless $job && $job->{'applydeltas'};
+  my ($dn, @deltas) = @{$job->{'applydeltas'}};
+  delete $job->{'applydeltas'};
+  my $err;
+  (undef, $err) = runprg_finish($job);
+  if ($config_keep_uncombined || @deltas <= 1) {
+    if (@deltas > 1) {
+      unlink($dn) || die("unlink $dn: $!\n");
+    }
+    return @deltas;
+  }
+  for my $d (@deltas) {
+    unlink($d) || die("unlink $d: $!\n");
+  }
+  return ($dn);
+}
+
+sub checkjob {
+  my ($pn) = @_;
+  return unless $runningjob;
+  my $job = $runningjob;
+  if (defined($pn)) {
+    return if $job->{'wip'} ne $pn;
+  }
+  undef $runningjob;
+  my @args = @{$job->{'finishargs'}};
+  delete $job->{'finishargs'};
+  $job->{'finish'}->(@args);
+}
+
+
+#######################################################################
+# repo functions
+#######################################################################
+
+sub repo_search {
+  my ($dpn, $k) = @_;
+  local *F;
+  open(F, '<', "$config_repo/$dpn") || return ();
+  my $k2 = substr($k, 32, 32);
+  my ($l, @l);
+  my (@r1, @r2, @r3);
+  while (defined($l = <F>)) {
+    chomp $l;
+    my @l = split(' ', $l, 3);
+    if ($l[0] eq $k) {
+      push @r1, \@l;
+    } elsif (substr($l[0], 32, 32) eq $k2) {
+      push @r2, \@l;
+    } else {
+      push @r3, \@l;
+    }
+  }
+  close F;
+  return (@r1, @r2, @r3);
+}
+
+sub repo_check {
+  my (@r) = @_;
+
+  my @s;
+  for my $r (splice(@r)) {
+    if ($r->[2] =~ /^(.*)@([0-9a-f]{10}:[0-9a-f]{8}$)/) {
+      @s = stat($1);
+    } else {
+      @s = stat($r->[2]);
+    }
+    push @r, $r if @s && $r->[1] eq "$s[9]/$s[7]";
+  }
+  return @r;
+}
+
+sub repo_cp {
+  my ($r, $bdir, $to, $extractoff) = @_;
+
+  my $d = "$bdir/$to";
+
+  local(*F, *OF);
+  my @s;
+  my $len;
+  if ($r->[2] =~ /^(.*)@([0-9a-f]{2})([0-9a-f]{8}):([0-9a-f]{8}$)/) {
+    my $iso = $1;
+    open(F, '<', $iso) || return undef;
+    @s = stat(F);
+    if (!@s || $r->[1] ne "$s[9]/$s[7]") {
+      close F;
+      return undef;
+    }
+    $len = hex($4);
+    if (!$len || !defined(sysseek(F, hex($2) * 4294967296 + hex($3), 0))) {
+      close F;
+      return undef;
+    }
+  } else {
+    open(F, '<', $r->[2]) || return undef;
+    @s = stat(F);
+    if (!@s || $r->[1] ne "$s[9]/$s[7]") {
+      close F;
+      return undef;
+    }
+  }
+  if ($extractoff) {
+    if (!open(OF, '+<', $d)) {
+      close F;
+      return undef;
+    }
+    if (!defined(sysseek(OF, $extractoff, 0))) {
+      close F;
+      close OF;
+      return undef;
+    }
+  } else {
+    if (!open(OF, '>', $d)) {
+      close F;
+      return undef;
+    }
+  }
+  my @info = cprpm(*F, *OF, 1, $len);
+  if (!close(OF)) {
+    close(F);
+    unlink($d);
+    return undef;
+  }
+  close(F);
+  if (@info != 3 || $info[0] ne $r->[0]) {
+    unlink($d);
+    return undef;
+  }
+  @s = stat($d);
+  if (!@s) {
+    unlink($d);
+    return undef;
+  }
+  return [ $to, "$s[9]/$s[7]/$s[1]", sprintf("1%03x%08x", ($s[2] & 07777), $s[9]), @info ];
+}
+
+sub repo_add_iso {
+  my ($fn, $d) = @_;
+  local *F;
+  return unless open(F, '-|', $fragiso, 'listiso', $fn);
+  my @frags = <F>;
+  return unless close(F);
+  chomp @frags;
+  for my $f (@frags) {
+    my @f = split(' ', $f, 3);
+    repo_add("$fn\@$f[0]", [ "$fn\@$f[0]", $d->[1], $d->[2], $f[1], undef, $f[2] ] );
+  }
+}
+
+sub repo_add {
+  my ($fn, $d) = @_;
+
+  return if $fn =~ m!drpmsync/wip.*/!;
+  if (@$d < 6) {
+    repo_add_iso($fn, $d) if $fn =~ /(?<!\.delta)\.iso$/i;
+    return;
+  }
+  return if $fn =~ /[\000-\037]/;
+  return if $d->[5] =~ /[\000-\037\/]/ || length($d->[5]) < 3;
+  local *OLD;
+  local *NEW;
+  my $nlid = $d->[1];
+  $nlid =~ s/\/[^\/]*$//;
+  my $nl;
+  $nl = "$d->[3] $nlid $fn" if $nlid;
+  my $kill;
+  $kill = $1 if $fn =~ /^(.*)@[0-9a-f]{2}[0-9a-f]{8}:[0-9a-f]{8}$/;
+  $kill = $fn if !$nlid && $fn =~ /(?<!\.delta)\.iso$/i;
+lock_retry:
+  if (!sysopen(OLD, "$config_repo/$d->[5]", POSIX::O_RDWR|POSIX::O_CREAT, 0666)) {
+    if (!sysopen(OLD, "$config_repo/$d->[5]", POSIX::O_RDONLY)) {
+      warn("$config_repo/$d->[5]: $!\n");
+      return;
+    }
+  }
+  if (!flock(OLD, LOCK_EX)) {
+    warn("$config_repo/$d->[5]: flock: $!\n");
+    return;
+  }
+  if (!(stat(OLD))[3]) {
+    close(OLD);
+    goto lock_retry;
+  }
+  my $old = '';
+  my $new = '';
+  while ((sysread(OLD, $old, 8192, length($old)) || 0) == 8192) {};
+  for my $l (split("\n", $old)) {
+    if ($nl && $l eq $nl) {
+      undef $nl;
+    } else {
+      if ($kill) {
+        my @lf = split(' ', $l);
+        next if $lf[2] =~ /^(.*)@[0-9a-f]{2}[0-9a-f]{8}:[0-9a-f]{8}$/ && $kill eq $1 && $lf[1] ne $nlid;
+      } else {
+        next if (split(' ', $l))[2] eq $fn;
+      }
+    }
+    $new .= "$l\n";
+  }
+  if ($nl) {
+    $new .= "$nl\n";
+  } elsif ($old eq $new) {
+    close OLD;
+    return;
+  }
+  if (!sysopen(NEW, "$config_repo/$d->[5].new", POSIX::O_WRONLY|POSIX::O_CREAT|POSIX::O_TRUNC, 0666)) {
+    warn("$config_repo/$d->[5].new open: $!\n");
+    close(OLD);
+    return;
+  }
+  if ((syswrite(NEW, $new) || 0) != length($new) || !close(NEW)) {
+    warn("$config_repo/$d->[5].new write: $!\n");
+    close(NEW);
+    close(OLD);
+    unlink("$config_repo/$d->[5].new");
+    return;
+  }
+  if (!rename("$config_repo/$d->[5].new", "$config_repo/$d->[5]")) {
+    warn("$config_repo/$d->[5] rename: $!\n");
+    close(OLD);
+    unlink("$config_repo/$d->[5].new");
+    return;
+  }
+  close(OLD);
+}
+
+sub repo_del {
+  my ($fn, $d) = @_;
+  my $dir;
+  if (@$d > 5) {
+    $dir = $d->[5];
+  } else {
+    return if $fn !~ /(?<!\.delta)\.iso$/i;
+  }
+  if (!$dir) {
+    local *DIR;
+    opendir(DIR, $config_repo) || return;
+    my @ds = grep {$_ ne '.' && $_ ne '..' && !/\..*\.new$/} readdir(DIR);
+    closedir(DIR);
+    for my $ds (@ds) {
+      repo_add($fn, [undef, '', undef, undef, undef, $ds]);
+    }
+  } else {
+    repo_add($fn, [undef, '', undef, undef, undef, $dir]);
+  }
+}
+
+sub repo_validate {
+  my $d = shift;
+  if (!$d) {
+    local *DIR;
+    opendir(DIR, $config_repo) || return;
+    my @ds = grep {$_ ne '.' && $_ ne '..' && !/\..*\.new$/} readdir(DIR);
+    closedir(DIR);
+    for my $ds (@ds) {
+      repo_validate($ds);
+    }
+    return;
+  }
+  local *OLD;
+  local *NEW;
+lock_retry:
+  if (!sysopen(OLD, "$config_repo/$d", POSIX::O_RDWR|POSIX::O_CREAT, 0666)) {
+    if (!sysopen(OLD, "$config_repo/$d", POSIX::O_RDONLY)) {
+      warn("$config_repo/$d: $!\n");
+      return;
+    }
+  }
+  if (!flock(OLD, LOCK_EX)) {
+    warn("$config_repo/$d: flock: $!\n");
+    return;
+  }
+  if (!(stat(OLD))[3]) {
+    close(OLD);
+    goto lock_retry;
+  }
+  my $old = '';
+  my $new = '';
+  while ((sysread(OLD, $old, 8192, length($old)) || 0) == 8192) {};
+  for my $l (split("\n", $old)) {
+    my @lf = split(' ', $l);
+    my @s;
+    if ($lf[2] =~ /^(.*)@[0-9a-f]{2}[0-9a-f]{8}:[0-9a-f]{8}$/) {
+      @s = stat($1);
+    } else {
+      @s = stat($lf[2]);
+    }
+    next if !@s || "$s[9]/$s[7]" ne $lf[1];
+    $new .= "$l\n";
+  }
+  if ($new eq $old) {
+    close OLD;
+    return;
+  }
+  if (!sysopen(NEW, "$config_repo/$d.new", POSIX::O_WRONLY|POSIX::O_CREAT|POSIX::O_TRUNC, 0666)) {
+    warn("$config_repo/$d.new open: $!\n");
+    close(OLD);
+    return;
+  }
+  if ((syswrite(NEW, $new) || 0) != length($new) || !close(NEW)) {
+    warn("$config_repo/$d.new write: $!\n");
+    close(NEW);
+    close(OLD);
+    unlink("$config_repo/$d.new");
+    return;
+  }
+  if (!rename("$config_repo/$d.new", "$config_repo/$d")) {
+    warn("$config_repo/$d rename: $!\n");
+    close(OLD);
+    unlink("$config_repo/$d.new");
+    return;
+  }
+  close(OLD);
+}
+
+#######################################################################
+
+my %files;
+my %syncfiles;
+my $had_gone;
+
+sub dirchanged {
+  my $dir = shift;
+  $dir =~ s/[^\/]+$//;
+  $dir =~ s/\/+$//;
+  return unless $dir ne '';
+  my $d = $files{$dir};
+  return unless $d && $d->[2] =~ /^0/;
+  $d->[2] = substr($d->[2], 0, 4)."ffffffff";
+}
+
+
+##################################################################
+
+my $net_start_tv;
+my $net_start_rvbytes;
+my $net_recv_bytes = 0;
+my $net_spent_time = 0;
+
+my $txbytes = 0;
+my $rvbytes = 0;
+my $sabytes = 0;
+
+sub setup_proto {
+  my $proto = shift;
+  if ($proto eq 'file') {
+    *get_syncfiles = \&file_get_syncfiles;
+    *get_update = \&file_get_update;
+    *send_fin = \&file_send_fin;
+  } elsif ($proto eq 'drpmsync') {
+    *get_syncfiles = \&drpmsync_get_syncfiles;
+    *get_update = \&drpmsync_get_update;
+    *send_fin = \&drpmsync_send_fin;
+  } elsif ($proto eq 'rsync') {
+    *get_syncfiles = \&rsync_get_syncfiles;
+    *get_update = \&rsync_get_update;
+    *send_fin = \&rsync_send_fin;
+  } elsif ($proto eq 'null') {
+    *get_syncfiles = sub {return ()};
+    *get_update = sub {die;};
+    *send_fin = sub {};
+  } else {
+    die("unsupported protocol: $proto\n");
+  }
+}
+
+#######################################################################
+# file protocol
+#######################################################################
+
+sub file_get_syncfiles {
+  my $norecurse = shift;
+
+  my @oldfiles = @files;
+  my @oldcache = %cache;
+  my $oldcachehits = $cachehits;
+  my $oldcachemisses = $cachemisses;
+  @files = ();
+  $cachehits = $cachemisses = 0;
+  readcache("$syncroot/drpmsync/cache");
+  findfiles($syncroot, '', 0, $norecurse);
+  my @syncfiles = @files;
+  @files = @oldfiles;
+  %cache = @oldcache;
+  $cachehits = $oldcachehits;
+  $cachemisses = $oldcachemisses;
+  $newstamp1 = $newstamp2 = sprintf("%08x", time);
+  return @syncfiles;
+}
+
+sub file_get_update {
+  my ($dto, $tmpnam, $reqext, $rextract) = @_;
+
+  die("rextract in FILE transport\n") if $rextract;
+  my @s = lstat("$syncroot/$dto->[0]");
+  return 'GONE' unless @s;
+  my $type;
+  my @info;
+  if (-l _) {
+    $type = '2';
+    my $lc = readlink("$syncroot/$dto->[0]");
+    return 'GONE' unless defined $lc;
+    symlink($lc, $tmpnam) || die("symlink: $!\n");
+    @info = linkinfo($tmpnam);
+  } elsif (! -f _) {
+    return 'GONE';
+  } else {
+    $type = '1';
+    local *F;
+    local *NF;
+    open(F, '<', "$syncroot/$dto->[0]") || return 'GONE';
+    @s = stat(F);
+    die("stat: $!\n") unless @s;
+    open(NF, '>', $tmpnam) || die("$tmpnam: $!\n");
+    if ($dto->[0] !~ /\.[sr]pm$/) {
+      @info = cpfile(*F, *NF);
+    } else {
+      @info = cprpm(*F, *NF);
+      if (@info != 3) {
+        defined(sysseek(F, 0, 0)) || die("sysseek: $!\n");
+        close(NF);
+        open(NF, '>', $tmpnam) || die("$tmpnam: $!\n");
+        @info = cpfile(*F, *NF);
+      }
+    }
+    close(F);
+    close(NF) || die("$tmpnam: $!\n");
+    fixmodetime($tmpnam, sprintf("1%03x%08x", ($s[2] & 07777), $s[9]));
+  }
+  @s = lstat($tmpnam);
+  die("$tmpnam: $!\n") unless @s;
+  if (@info == 3) {
+    return 'RPM ', [ $dto->[0], "$s[9]/$s[7]/$s[1]", sprintf("1%03x%08x", ($s[2] & 07777), $s[9]), @info ];
+  } else {
+    return 'FILE', [ $dto->[0], "$s[9]/$s[7]/$s[1]", sprintf("$type%03x%08x", ($s[2] & 07777), $s[9]), @info ];
+  }
+}
+
+sub file_send_fin {
+}
+
+
+#######################################################################
+# rsync protocol
+#######################################################################
+
+sub sread {
+  local *SS = shift;
+  my $len = shift;
+  $rvbytes += $len;
+  my $ret = '';
+  while ($len > 0) {
+    my $r = sysread(SS, $ret, $len, length($ret));
+    die("read error") unless $r;
+    $len -= $r;
+    die("read too much") if $r < 0;
+  }
+  return $ret;
+}
+
+sub swrite {
+  local *SS = shift;
+  my ($var, $len) = @_;
+  $len = length($var) unless defined $len;
+  $txbytes += $len;
+  (syswrite(SS, $var, $len) || 0) == $len || die("syswrite: $!\n");
+}
+
+my $rsync_muxbuf = '';
+
+sub muxread {
+  local *SS = shift;
+  my $len = shift;
+
+  #print "muxread $len\n";
+  while(length($rsync_muxbuf) < $len) {
+    #print "muxbuf len now ".length($muxbuf)."\n";
+    my $tag = '';
+    $tag = sread(*SS, 4);
+    $tag = unpack('V', $tag);
+    my $tlen = 0+$tag & 0xffffff;
+    $tag >>= 24;
+    if ($tag == 7) {
+      $rsync_muxbuf .= sread(*SS, $tlen);
+      next;
+    }
+    if ($tag == 8 || $tag == 9) {
+      my $msg = sread(*SS, $tlen);
+      die("$msg\n") if $tag == 8;
+      print "info: $msg\n";
+      next;
+    }
+    die("unknown tag: $tag\n");
+  }
+  my $ret = substr($rsync_muxbuf, 0, $len);
+  $rsync_muxbuf = substr($rsync_muxbuf, $len);
+  return $ret;
+}
+
+my $have_md4;
+my $rsync_checksum_seed;
+my $rsync_protocol;
+
+sub rsync_get_syncfiles {
+  my $norecurse = shift;
+
+  my $user = $syncuser;
+  my $password = $syncpassword;
+  if (!defined($have_md4)) {
+    $have_md4 = 0;
+    eval {
+      require Digest::MD4;
+      $have_md4 = 1;
+    };
+  }
+  $syncroot =~ s/^\/+//;
+  my $module = $syncroot;
+  $module =~ s/\/.*//;
+  my $tcpproto = getprotobyname('tcp');
+  socket(S, PF_INET, SOCK_STREAM, $tcpproto) || die("socket: $!\n");
+  connect(S, sockaddr_in($syncport, $syncaddr)) || die("connect: $!\n");
+  my $hello = "\@RSYNCD: 28\n";
+  swrite(*S, $hello);
+  my $buf = '';
+  sysread(S, $buf, 4096);
+  die("protocol error [$buf]\n") if $buf !~ /^\@RSYNCD: (\d+)\n/s;
+  $rsync_protocol = $1;
+  $rsync_protocol = 28 if $rsync_protocol > 28;
+  swrite(*S, "$module\n");
+  while(1) {
+    sysread(S, $buf, 4096);
+    die("protocol error [$buf]\n") if $buf !~ s/\n//s;
+    last if $buf eq "\@RSYNCD: OK";
+    die("$buf\n") if $buf =~ /^\@ERROR/s;
+    if ($buf =~ /^\@RSYNCD: AUTHREQD /) {
+      die("'$module' needs authentification, but Digest::MD4 is not installed\n") unless $have_md4;
+      $user = "nobody" if !defined($user) || $user eq '';
+      $password = '' unless defined $password;
+      my $digest = "$user ".Digest::MD4::md4_base64("\0\0\0\0$password".substr($buf, 18))."\n";
+      swrite(*S, $digest);
+      next;
+    }
+  }
+  my @args = ('--server', '--sender', '-rl');
+  push @args, '--exclude=/*/*' if $norecurse;
+  for my $arg (@args, '.', "$syncroot/.", '') {
+    swrite(*S, "$arg\n");
+  }
+  $rsync_checksum_seed = unpack('V', sread(*S, 4));
+  swrite(*S, "\0\0\0\0");
+  my @filelist;
+  my $name = '';
+  my $mtime = 0;
+  my $mode = 0;
+  my $uid = 0;
+  my $gid = 0;
+  my $flags;
+  while(1) {
+    $flags = muxread(*S, 1);
+    $flags = ord($flags);
+    # printf "flags = %02x\n", $flags;
+    last if $flags == 0;
+    $flags |= ord(muxread(*S, 1)) << 8 if $rsync_protocol >= 28 && ($flags & 0x04) != 0;
+    my $l1 = $flags & 0x20 ? ord(muxread(*S, 1)) : 0;
+    my $l2 = $flags & 0x40 ? unpack('V', muxread(*S, 4)) : ord(muxread(*S, 1));
+    $name = substr($name, 0, $l1).muxread(*S, $l2);
+    my $len = unpack('V', muxread(*S, 4));
+    if ($len == 0xffffffff) {
+      $len = unpack('V', muxread(*S, 4));
+      my $len2 = unpack('V', muxread(*S, 4));
+      $len += $len2 * 4294967296;
+    }
+    $mtime = unpack('V', muxread(*S, 4)) unless $flags & 0x80;
+    $mode = unpack('V', muxread(*S, 4)) unless $flags & 0x02;
+    my $id = "$mtime/$len/";
+    my @info = ();
+    my $mmode = $mode & 07777;
+    if (($mode & 0170000) == 0100000) {
+      @info = ('x');
+      $mmode |= 0x1000;
+    } elsif (($mode & 0170000) == 0040000) {
+      $mmode |= 0x0000;
+    } elsif (($mode & 0170000) == 0120000) {
+      $mmode |= 0x2000;
+      my $ln = muxread(*S, unpack('V', muxread(*S, 4)));
+      @info = (Digest::MD5::md5_hex($ln));
+      $id .= "$ln/";
+    } else {
+      print "$name: unknown mode: $mode\n";
+      next;
+    }
+    push @filelist, [$name, $id, sprintf("%04x%08x", $mmode, $mtime), @info];
+  }
+  my $io_error = unpack('V', muxread(*S, 4));
+  @filelist = sort {$a->[0] cmp $b->[0]} @filelist;
+  my $fidx = 0;
+  $_->[1] .= $fidx++ for @filelist;
+  $newstamp1 = $newstamp2 = sprintf("%08x", time);
+  return grep {$_->[0] ne '.'} @filelist;
+}
+
+sub rsync_adapt_filelist {
+  my $fl = shift;
+  my %c;
+  for (@files) {
+    my $i = $_->[1];
+    $i =~ s/[^\/]+$//;
+    $c{$i} = $_;
+  }
+  for (@$fl) {
+    next if @$_ == 3 || $_->[3] ne 'x';
+    my $i = $_->[1];
+    $i =~ s/[^\/]+$//;
+    next unless $c{$i};
+    my @info = @{$c{$i}};
+    splice(@info, 0, 3);
+    splice(@$_, 3, 1, @info);
+  }
+}
+
+sub rsync_get_update {
+  my ($dto, $tmpnam, $reqext, $rextract) = @_;
+
+  die("rextract in RSYNC transport\n") if $rextract;
+  my $fidx = $dto->[1];
+  if ($dto->[2] =~ /^2/) {
+    $fidx =~ s/^[^\/]*\/[^\/]*\///s;
+    $fidx =~ s/\/[^\/]*$//s;
+    symlink($fidx, $tmpnam) || die("symlink: $!\n");
+    my @s = lstat($tmpnam);
+    die("$tmpnam: $!\n") unless @s;
+    return 'FILE', [ $dto->[0], "$s[9]/$s[7]/$s[1]", sprintf("2%03x%08x", ($s[2] & 07777), $s[9]), linkinfo($tmpnam) ];
+  }
+  $fidx =~ s/.*\///;
+  swrite(*S, pack('V', $fidx));
+  swrite(*S, ("\0\0\0\0" x ($rsync_protocol >= 27 ? 4 : 3)));
+  my $rfidx = unpack('V', muxread(*S, 4));
+  die("rsync file mismatch $rfidx - $fidx\n") if $rfidx != $fidx;
+  my $sumhead = muxread(*S, 4 * ($rsync_protocol >= 27 ? 4 : 3));
+  my $md4ctx;
+  $md4ctx = Digest::MD4->new if $have_md4;
+  $md4ctx->add(pack('V', $rsync_checksum_seed)) if $have_md4;
+  local *OF;
+  open(OF, '>', $tmpnam) || die("$tmpnam: $!\n");
+  while(1) {
+    my $l = unpack('V', muxread(*S, 4));
+    last if $l == 0;
+    die("received negative token\n") if $l < 0;
+    my $chunk = muxread(*S, $l);
+    $md4ctx->add($chunk) if $have_md4;
+    syswrite(OF, $chunk) == $l || die("syswrite: $!\n");
+  }
+  close(OF) || die("close: $!\n");
+  my $md4sum = muxread(*S, 16);
+  if ($have_md4) {
+    die("data corruption on net\n") if unpack("H32", $md4sum) ne $md4ctx->hexdigest();
+  }
+  fixmodetime($tmpnam, $dto->[2]);
+  my @s = lstat($tmpnam);
+  die("$tmpnam: $!\n") unless @s;
+  if ($dto->[0] =~ /\.[sr]pm$/) {
+    return 'RPM ', [ $dto->[0], "$s[9]/$s[7]/$s[1]", sprintf("1%03x%08x", ($s[2] & 07777), $s[9]), rpminfo($tmpnam) ];
+  } else {
+    return 'FILE', [ $dto->[0], "$s[9]/$s[7]/$s[1]", sprintf("1%03x%08x", ($s[2] & 07777), $s[9]), fileinfo($tmpnam) ];
+  }
+}
+
+sub rsync_send_fin {
+  swrite(*S, pack('V', -1));      # switch to phase 2
+  swrite(*S, pack('V', -1));      # switch to phase 3
+  if ($rsync_protocol >= 24) {
+    swrite(*S, pack('V', -1));    # goodbye
+  }
+  close(S);
+}
+
+#######################################################################
+# drpmsync protocol
+#######################################################################
+
+my $sock_isopen;
+
+sub tolength {
+  local (*SOCK) = shift;
+  my ($ans, $l) = @_;
+  while (length($ans) < $l) {
+    die("received truncated answer\n") if !sysread(SOCK, $ans, $l - length($ans), length($ans));
+  }
+  return $ans;
+}
+
+sub copytofile {
+  return copytofile_seek($_[0], $_[1], 0, $_[2], $_[3], $_[4]);
+}
+
+sub copytofile_seek {
+  local (*SOCK) = shift;
+  my ($fn, $extractoff, $ans, $l, $ctx) = @_;
+
+  local *FD;
+  if ($extractoff) {
+    open(FD, '+<', $fn) || die("$fn: $!\n");
+    defined(sysseek(FD, $extractoff, 0)) || die("sysseek: $!\n");
+  } else {
+    open(FD, '>', $fn) || die("$fn: $!\n");
+  }
+  my $al = length($ans);
+  if ($al >= $l) {
+    die("$fn: write error\n") if syswrite(FD, $ans, $l) != $l;
+    die("$fn: write error\n") unless close(FD);
+    $ctx->add(substr($ans, 0, $l));
+    return substr($ans, $l);
+  }
+  if ($al > 0) {
+    die("$fn: write error\n") if syswrite(FD, $ans, $al) != $al;
+    $ctx->add($ans);
+    $l -= $al;
+    $ans = '';
+  }
+  while ($l > 0) {
+    die("received truncated answer\n") if !sysread(SOCK, $ans, $l > 8192 ? 8192 : $l, 0);
+    $al = length($ans);
+    die("$fn: write error\n") if syswrite(FD, $ans, $al) != $al;
+    $ctx->add($ans);
+    $l -= $al;
+    $ans = '';
+  }
+  die("$fn: write error\n") unless close(FD);
+  return '';
+}
+
+sub opensock {
+  return if $sock_isopen;
+  my $tcpproto = getprotobyname('tcp');
+  socket(S, PF_INET, SOCK_STREAM, $tcpproto) || die("socket: $!\n");
+  connect(S, sockaddr_in($syncport, $syncaddr)) || die("connect: $!\n");
+  $sock_isopen = 1;
+}
+
+sub finishreq {
+  local (*SOCK) = shift;
+  my ($ans, $ctx, $id) = @_;
+
+  if ($ctx) {
+    $ans = tolength(*SOCK, $ans, 32);
+    my $netmd5 = substr($ans, 0, 32);
+    die("network error: bad md5 digest\n") if $netmd5 =~ /[^a-f0-9]/;
+    my $md5 = $ctx->hexdigest;
+    die("network error: $md5 should be $netmd5\n") if $md5 ne $netmd5;
+    $ans = substr($ans, 32);
+  }
+  alarm(0) if $config_timeout;
+  if ($have_time_hires && defined($net_start_tv)) {
+    $net_spent_time += Time::HiRes::tv_interval($net_start_tv);
+    $net_recv_bytes += $rvbytes - $net_start_rvbytes;
+    $net_start_rvbytes = $rvbytes;
+    undef $net_start_tv;
+  }
+  if ($id && ($id ne 'DRPMSYNK' || length($ans))) {
+    close(SOCK);
+    undef $sock_isopen;
+  }
+  return $ans;
+}
+
+sub drpmsync_get_syncfiles {
+  my ($norecurse, $filelist_data) = @_;
+
+  my $data;
+  if (defined($filelist_data)) {
+    $data = $filelist_data;
+    goto use_filelist_data;
+  }
+  alarm($config_timeout) if $config_timeout;
+  opensock() unless $sock_isopen;
+  my $opts = '';
+  $opts .= '&zlib' if $have_zlib;
+  $opts .= '&norecurse' if $norecurse;
+  if (@filter_comp) {
+    my @fc = @filter_comp;
+    while (@fc) {
+      splice(@fc, 0, 2);
+      my $r = shift @fc;
+      $r =~ s/([\000-\040<>\"#&\+=%[\177-\377])/sprintf("%%%02X",ord($1))/sge;
+      $opts .= "&filter=$r";
+    }
+  }
+  if (@filter_arch_comp) {
+    my @fc = @filter_arch_comp;
+    while (@fc) {
+      splice(@fc, 0, 2);
+      my $r = shift @fc;
+      $r =~ s/([\000-\040<>\"#&\+=%[\177-\377])/sprintf("%%%02X",ord($1))/sge;
+      $opts .= "&filter_arch=$r";
+    }
+  }
+  my $query = "GET $esyncroot/drpmsync/contents?drpmsync$opts HTTP/1.0\r\nHost: $synchost\r\n\r\n";
+  $txbytes += length($query);
+  (syswrite(S, $query, length($query)) || 0) == length($query) || die("network write failed\n");
+  my $ans = '';
+  do {
+    die("received truncated answer\n") if !sysread(S, $ans, 1024, length($ans));
+  } while ($ans !~ /\n\r?\n/s);
+  $rvbytes += length($ans);
+  $ans =~ /\n\r?\n(.*)$/s;
+  $rvbytes -= length($1);
+  $ans = tolength(*S, $1, 32);
+  my $id = substr($ans, 0, 8);
+  die("received bad answer\n") if $id ne 'DRPMSYNC' && $id ne 'DRPMSYNK';
+  my $vers = hex(substr($ans, 8, 4));
+  die("answer has bad version\n") if $vers != 1;
+  my $type = substr($ans, 12, 4);
+  if ($type eq 'ERR ') {
+    my $anssize = hex(substr($ans, 24, 8));
+    $ans = tolength(*S, $ans, 32 + $anssize);
+    die("remote error: ".substr($ans, 32, $anssize)."\n");
+  }
+  die("can only sync complete trees\n") if $type eq 'GONE';
+  die("server send wrong answer\n") if $type ne 'SYNC' && $type ne 'SYNZ';
+  die("server send bad answer\n") if hex(substr($ans, 16, 8));
+  my $anssize = hex(substr($ans, 24, 8));
+  die("answer is too short\n") if $anssize < 28;
+  $rvbytes += 32 + $anssize + 32;
+  $ans = substr($ans, 32);
+  $ans = tolength(*S, $ans, $anssize);
+  $data = substr($ans, 0, $anssize);
+  $ans = substr($ans, $anssize);
+  my $ctx = Digest::MD5->new;
+  $ctx->add($data);
+  $ans = finishreq(*S, $ans, $ctx, $id);
+  $data = substr($data, 12);
+  if ($type eq 'SYNZ') {
+    die("cannot uncompress\n") unless $have_zlib;
+    $data = Compress::Zlib::uncompress($data);
+  }
+use_filelist_data:
+  my $filesnum = unpack('N', $data);
+  # work around perl 5.8.0 bug, where "(w/a*w/a*)*" does not work
+  my @data = unpack("x[N]".("w/a*w/a*" x ($filesnum + 1)), $data);
+  die("bad tree start\n") if @data < 2 || length($data[1]) != 8;
+  die("bad number of file entries\n") if @data != 2 * $filesnum + 2;
+  $synctree = shift @data;
+  $synctree .= '/' if $synctree ne '/';
+  ($newstamp1, $newstamp2) = unpack('H8H8', shift @data);
+  my @syncfiles = ();
+  while (@data) {
+    my ($name, $hex) = splice @data, 0, 2;
+    die("bad file name in list: $name\n") if "/$name/" =~ /\/(\.|\.\.|)\//;
+    if (length($hex) == 6) {
+      push @syncfiles, [ $name, undef, unpack('H12', $hex) ];
+    } elsif (length($hex) == 6 + 16) {
+      push @syncfiles, [ $name, undef, unpack('H12H32', $hex) ];
+    } elsif (length($hex) >= 6 + 32 + 4) {
+      my @l = ($name, undef, unpack('H12H64H8a*', $hex));
+      die("bad name.arch in file list: $l[5]\n") if $l[5] eq '.' || $l[5] eq '..' || $l[5] =~ /\//;
+      push @syncfiles, \@l;
+    } else {
+      die("bad line for $name\n");
+    }
+  }
+  # validate that no entry is listed twice
+  my %ents;
+  my %dirs;
+  for (@syncfiles) {
+    die("entry $_->[0] is listed twice\n") if exists $ents{$_->[0]};
+    $ents{$_->[0]} = 1;
+    if ($_->[2] =~ /^0/) {
+      $dirs{$_->[0]} = 1;
+      die("directory $_->[0] has bad data\n") unless @$_ == 3;
+    } else {
+      die("entry $_->[0] has bad data\n") unless @$_ > 3;
+    }
+  }
+  # validate that all files are connected to dirs
+  for (@syncfiles) {
+    next unless /^(.*)\//;
+    die("entry $_->[0] is not connected\n") unless $dirs{$1};
+  }
+  return @syncfiles;
+}
+
+sub drpmsync_send_fin {
+  return unless $sock_isopen;
+  my $query = "GET $esyncroot/drpmsync/closesock?drpmsync HTTP/1.0\r\nHost: $synchost\r\n\r\n";
+  $txbytes += length($query);
+  syswrite(S, $query, length($query)) == length($query) || die("network write failed\n");
+  close(S);
+  undef $sock_isopen;
+}
+
+sub drpmsync_get_update {
+  my ($dto, $tmpnam, $reqext, $rextract) = @_;
+
+  my $d;
+  my $extractoff = 0;
+  if ($rextract) {
+    die("bad extract parameter\n") unless $rextract =~ /^([0-9a-fA-F]{2})([0-9a-fA-F]{8}):[0-9a-fA-F]{8}$/;
+    $extractoff = hex($1) * 4294967296 + hex($2);
+  }
+
+  my $req = aescape($dto->[0]);
+  $req = "/$req?drpmsync";
+  $req .= "&extract=$rextract" if $rextract;
+  $req .= $reqext if $reqext;
+# XXX print "-> $req\n";
+  alarm($config_timeout) if $config_timeout;
+  opensock() unless $sock_isopen;
+  my $query = "GET $esyncroot$req HTTP/1.0\r\nHost: $synchost\r\n\r\n";
+  $txbytes += length($query);
+  if (syswrite(S, $query, length($query)) != length($query)) {
+    die("network write failed\n");
+  }
+  $net_start_tv = [Time::HiRes::gettimeofday()] if $have_time_hires;
+  $net_start_rvbytes = $rvbytes;
+  my $ans = '';
+  do {
+    die("received truncated answer\n") if !sysread(S, $ans, 1024, length($ans));
+  } while ($ans !~ /\n\r?\n/s);
+  $rvbytes += length($ans);
+  $ans =~ /\n\r?\n(.*)$/s;
+  $rvbytes -= length($1);
+  $ans = tolength(*S, $1, 32);
+  my $id = substr($ans, 0, 8);
+  die("received bad answer: $ans\n") if $id ne 'DRPMSYNC' && $id ne 'DRPMSYNK';
+  my $vers = hex(substr($ans, 8, 4));
+  die("answer has bad version\n") if $vers != 1;
+  my $type = substr($ans, 12, 4);
+  my $namelen = hex(substr($ans, 16, 8));
+  my $anssize = hex(substr($ans, 24, 8));
+  if ($anssize == 4294967295) {
+    $ans = tolength(*S, $ans, 32 + 10);
+    $anssize = hex(substr($ans, 32, 2)) * 4294967296 + hex(substr($ans, 32 + 2, 8));
+    $ans = substr($ans, 10);
+  }
+  $rvbytes += 32 + $namelen + $anssize + 32;
+  if ($type eq 'ERR ') {
+    $ans = tolength(*S, $ans, 32 + $namelen + $anssize);
+    return $type , substr($ans, 32 + $namelen, $anssize);
+  }
+  $ans = tolength(*S, $ans, 32 + $namelen);
+  die("answer does not match request $syncroot/$dto->[0] - $synctree".substr($ans, 32, $namelen)."\n") if "$syncroot/$dto->[0]" ne $synctree.substr($ans, 32, $namelen);
+  $ans = substr($ans, 32 + $namelen);
+
+  if ($type eq 'GONE' || $type eq 'NODR') {
+    $ans = finishreq(*S, $ans, undef, $id);
+    return $type;
+  }
+  my $extra = '';
+  my $extralen = 12;
+  $extralen = 12 + 16 if $type eq 'RPM ';
+
+  die("answer is too short\n") if $anssize < $extralen;
+  my $ctx = Digest::MD5->new;
+  my $ndrpm = 0;
+  my $nrpm = 0;
+  if ($extralen) {
+    $ans = tolength(*S, $ans, $extralen);
+    $extra = substr($ans, 0, $extralen);
+    die("illegal extra block\n") if $extra =~ /[^a-f0-9]/;
+    if ($type eq 'RPM ') {
+      $ndrpm = hex(substr($extra, 12, 8));
+      $nrpm = hex(substr($extra, 12 + 8, 8));
+      die("more than one rpm?\n") if $nrpm > 1;
+      if ($ndrpm) {
+        $extralen += $ndrpm * (12 + 32 * 3 + 8);
+        $ans = tolength(*S, $ans, $extralen);
+        $extra = substr($ans, 0, $extralen);
+        die("illegal extra block\n") if $extra =~ /[^a-f0-9]/;
+      }
+    }
+    $ans = substr($ans, $extralen);
+    $anssize -= $extralen;
+    $ctx->add($extra);
+  }
+
+  die("unexpected type $type\n") if $rextract && $type ne 'RPM ';
+
+  if ($type eq 'FILZ') {
+    die("cannot uncompress\n") unless $have_zlib;
+    $ans = tolength(*S, $ans, $anssize);
+    my $data = substr($ans, 0, $anssize);
+    $ctx->add($data);
+    $ans = finishreq(*S, substr($ans, $anssize), $ctx, $id);
+    $data = Compress::Zlib::uncompress($data);
+    my $datamd5 = Digest::MD5::md5_hex($data);
+    if ($dto->[2] =~ /^2/) {
+      symlink($data, $tmpnam) || die("symlink: $!\n");
+    } else {
+      open(FD, '>', $tmpnam) || die("$tmpnam: $!\n");
+      die("$tmpnam: write error\n") if (syswrite(FD, $data) || 0) != length($data);
+      close(FD) || die("$tmpnam: $!\n");
+      fixmodetime($tmpnam, substr($extra, 0, 12));
+    }
+    my @s = lstat($tmpnam);
+    die("$tmpnam: $!\n") unless @s;
+    if ($dto->[2] =~ /^2/) {
+      $d = [ $dto->[0], "$s[9]/$s[7]/$s[1]", sprintf("2%03x%08x", ($s[2] & 07777), $s[9]), linkinfo($tmpnam) ];
+    } else {
+      $d = [ $dto->[0], "$s[9]/$s[7]/$s[1]", sprintf("1%03x%08x", ($s[2] & 07777), $s[9]), $datamd5 ];
+    }
+    return ('FILZ', $d);
+  } elsif ($type eq 'FILE') {
+    if ($dto->[2] =~ /^2/) {
+      $ans = tolength(*S, $ans, $anssize);
+      $ctx->add(substr($ans, 0, $anssize));
+      symlink(substr($ans, 0, $anssize), $tmpnam) || die("symlink: $!\n");
+      $ans = substr($ans, $anssize);
+    } else {
+      $ans = copytofile(*S, $tmpnam, $ans, $anssize, $ctx);
+    }
+    $ans = finishreq(*S, $ans, $ctx, $id);
+    fixmodetime($tmpnam, substr($extra, 0, 12)) if $dto->[2] !~ /^2/;
+    my @s = lstat($tmpnam);
+    die("$tmpnam: $!\n") unless @s;
+    if ($dto->[2] =~ /^2/) {
+      $d = [ $dto->[0], "$s[9]/$s[7]/$s[1]", sprintf("2%03x%08x", ($s[2] & 07777), $s[9]), linkinfo($tmpnam) ];
+    } else {
+      $d = [ $dto->[0], "$s[9]/$s[7]/$s[1]", sprintf("1%03x%08x", ($s[2] & 07777), $s[9]), fileinfo($tmpnam) ];
+    }
+    return ('FILE', $d);
+  } elsif ($type eq 'FISO') {
+    $ans = copytofile(*S, "$tmpnam.fiso", $ans, $anssize, $ctx);
+    $ans = finishreq(*S, $ans, $ctx, $id);
+    return 'FISO', [ $tmpnam, undef, substr($extra, 0, 12) ];
+  } elsif ($type eq 'RPM ') {
+    $sabytes -= $anssize;
+    my $delta;
+    die("more than one rpm?\n") if $nrpm > 1;
+    die("nothing to do?\n") if $nrpm == 0 && $ndrpm == 0;
+    my @deltas;
+    my $dextra = substr($extra, 12 + 16);
+    while ($ndrpm > 0) {
+      $delta = $tmpnam;
+      $delta =~ s/[^\/]*$//;
+      $delta .= substr($dextra, 12, 32 * 3);
+      # end old job if we have a delta conflict
+      checkjob() if $runningjob && -e $delta;
+      my $size = hex(substr($dextra, 12 + 3 * 32, 8));
+      die("delta rpm bigger than answer? $size > $anssize\n") if $size > $anssize;
+      $ans = copytofile(*S, $delta, $ans, $size, $ctx);
+      $anssize -= $size;
+      fixmodetime($delta, substr($dextra, 0, 12));
+      $dextra = substr($dextra, 12 + 32 * 3 + 8);
+      push @deltas, $delta;
+      $ndrpm--;
+    }
+    if ($nrpm == 1) {
+      $ans = copytofile_seek(*S, $tmpnam, $extractoff, $ans, $anssize, $ctx);
+      $ans = finishreq(*S, $ans, $ctx, $id);
+      return 'RPM ', [ $dto->[0] ], @deltas if $rextract;
+      fixmodetime($tmpnam, substr($extra, 0, 12));
+      my @s = stat($tmpnam);
+      die("$tmpnam: $!\n") unless @s;
+      $sabytes += $s[7];
+      $d = [ $dto->[0], "$s[9]/$s[7]/$s[1]", sprintf("1%03x%08x", ($s[2] & 07777), $s[9]), rpminfo($tmpnam) ];
+    } else {
+      die("junk at end of answer\n") if $anssize;
+      $ans = finishreq(*S, $ans, $ctx, $id);
+      $d = [ undef, undef, substr($extra, 0, 12) ];
+    }
+    return 'RPM ', $d, @deltas;
+  } else {
+    die("received strange answer type: $type\n");
+  }
+}
+
+
+#######################################################################
+# update functions
+#######################################################################
+
+sub save_or_delete_deltas {
+  my ($bdir, $dpn, @deltas) = @_;
+
+  if (!$config_keep_deltas || !$dpn) {
+    for my $delta (@deltas) {
+      unlink($delta) || die("unlink $delta: $!\n");
+    }
+    return;
+  }
+  my $ddir = "$bdir/drpmsync/deltas/$dpn";
+  mkdir_p($ddir);
+  for my $delta (@deltas) {
+    my $dn = $delta;
+    $dn =~ s/.*\///;
+    if (substr($dn, 0, 32) eq substr($dn, 64, 32)) {
+      # print("detected signature-only delta\n");
+      local(*DDIR);
+      opendir(DDIR, "$ddir") || die("opendir $ddir: $!\n");
+      my @dh = grep {$_ =~ /^[0-9a-f]{96}$/} readdir(DDIR);
+      closedir(DDIR);
+      @dh = grep {substr($_, 64, 32) eq substr($dn, 64, 32)} @dh;
+      @dh = grep {substr($_, 32, 32) ne substr($dn, 32, 32)} @dh;
+      for my $dh (@dh) {
+	# recvlog_print("! $dh");
+	my $nn = substr($dh, 0, 32).substr($dn, 32, 64);
+	my @oldstat = stat("$ddir/$dh");
+	die("$ddir/$dh: $!") unless @oldstat;
+	if (system($combinedeltarpm, "$ddir/$dh", $delta, "$bdir/drpmsync/wip/$nn") || ! -f "$bdir/drpmsync/wip/$nn") {
+	  recvlog_print("! combinedeltarpm $ddir/$dh $delta $bdir/drpmsync/wip/$nn failed");
+	  unlink("$bdir/drpmsync/wip/$nn");
+	  next;
+	}
+	utime($oldstat[9], $oldstat[9], "$bdir/drpmsync/wip/$nn");
+	rename("$bdir/drpmsync/wip/$nn", "$ddir/$nn") || die("rename $bdir/drpmsync/wip/$nn $ddir/$nn: $!\n");
+	unlink("$bdir/drpmsync/deltas/$dpn/$dh") || die("unlink $bdir/drpmsync/deltas/$dpn/$dh: $!\n");
+      }
+      unlink($delta) || die("unlink $delta: $!\n");
+    } else {
+      rename($delta, "$ddir/$dn") || die("rename $delta $ddir/$dn: $!\n");
+    }
+  }
+}
+
+
+# get rpms for fiso, fill iso
+
+sub update_fiso {
+  my ($bdir, $pn, $dto, $rights) = @_;
+
+  local *F;
+  if (!open(F, '-|', $fragiso, 'list', "$bdir/drpmsync/wip/$pn.fiso")) {
+    unlink("$bdir/drpmsync/wip/$pn.fiso");
+    return undef;
+  }
+  my @frags = <F>;
+  close(F) || return undef;
+  chomp @frags;
+  open(F, '>', "$bdir/drpmsync/wip/$pn") || die("$bdir/drpmsync/wip/$pn: $!\n");
+  close(F);
+  for my $f (@frags) {
+    my @f = split(' ', $f, 3);
+    update($bdir, [ $dto->[0], undef, $rights, $f[1], undef, $f[2] ], $f[0]);
+  }
+  checkjob() if $runningjob;
+  my ($md5, $err) = runprg(undef, undef, $fragiso, 'fill', '-m', "$bdir/drpmsync/wip/$pn.fiso", "$bdir/drpmsync/wip/$pn");
+  unlink("$bdir/drpmsync/wip/$pn.fiso") || die("unlink $bdir/drpmsync/wip/$pn.fiso: $!\n");;
+  my $tmpnam = "$bdir/drpmsync/wip/$pn";
+  if ($err) {
+    recvlog_print("! fragiso fill failed: $err");
+    unlink($tmpnam);
+    return undef;
+  }
+  die("fragiso did not return md5\n") unless $md5 =~ /^[0-9a-f]{32}$/;
+  fixmodetime($tmpnam, $rights);
+  my @s = lstat($tmpnam);
+  die("$tmpnam: $!\n") unless @s;
+  $rights = sprintf("1%03x%08x", ($s[2] & 07777), $s[9]);
+  $files{$dto->[0]} = [ $dto->[0], "$s[9]/$s[7]/$s[1]", $rights, $md5 ];
+  rename($tmpnam, "$bdir/$dto->[0]") || die("rename $tmpnam $bdir/$dto->[0]: $!\n");
+  if ($config_repo) {
+    for my $f (@frags) {
+      my @f = split(' ', $f, 3);
+      repo_add("$bdir/$dto->[0]\@$f[0]", [ "$dto->[0]\@$f[0]", "$s[9]/$s[7]/$s[1]", $rights, $f[1], undef, $f[2] ] );
+    }
+  }
+  return 1;
+}
+
+
+# called for files and rpms
+
+sub update {
+  my ($bdir, $dto, $rextract, $play_it_safe) = @_;
+
+  my ($d, $nd, $md);
+  my $pdto0;
+  my @deltas;
+  my $extractoff;
+  my $tmpnam;
+
+  if ($play_it_safe && ref($play_it_safe)) {
+    # poor mans co-routine implementation...
+    my $job = $play_it_safe;
+    $d = $job->{'d'};
+    $nd = $job->{'nd'};
+    $md = $job->{'md'};
+    $pdto0 = $job->{'pdto0'};
+    $tmpnam = $job->{'tmpnam'};
+    $extractoff = $job->{'extractoff'};
+    @deltas = applydeltas_finish($job);
+    goto applydeltas_finished;
+  }
+
+  die("can only update files and symlinks\n") if $dto->[2] !~ /^[12]/;
+  $pdto0 = $dto->[0];        # for recvlog_print;
+
+  # hack: patch source/dest for special fiso request
+  if ($rextract) {
+    die("bad extract parameter\n") unless $rextract =~ /^([0-9a-fA-F]{2})([0-9a-fA-F]{8}):[0-9a-fA-F]{8}$/;
+    $extractoff = hex($1) * 4294967296 + hex($2);
+    die("bad extract offset\n") unless $extractoff;
+    $pdto0 = "$dto->[0]\@$rextract ($dto->[5])";
+  }
+
+  $d = $files{$dto->[0]};
+  if ($d && !$rextract && $d->[3] eq $dto->[3]) {
+    return if $d->[2] eq $dto->[2];	# already identical
+    if (substr($d->[2], 0, 1) eq substr($dto->[2], 0, 1)) {
+      return if substr($d->[2], 0, 1) eq '2';	# can't change links
+      fixmodetime("$bdir/$d->[0]", $dto->[2]);
+      $d->[2] = $dto->[2];
+      my $newmtime = hex(substr($dto->[2], 4, 8));
+      $d->[1] =~ s/^.*?\//$newmtime\//;		# patch cache id
+      return;
+    }
+  }
+
+  # check for simple renames
+  if (!$d && !$rextract && substr($dto->[2], 0, 1) eq '1') {
+    # search for same md5, same mtime and removed files
+    my @oldds = grep {@$_ > 3 && $_->[3] eq $dto->[3] && substr($_->[2], 4) eq substr($dto->[2], 4) && !$syncfiles{$_->[0]}} values %files;
+    if (@oldds) {
+      $d = $oldds[0];
+      my $pn = $dto->[0];
+      $pn =~ s/.*\///;
+      $tmpnam = "$bdir/drpmsync/wip/$pn";
+      checkjob($pn) if $runningjob;
+      # rename it
+      if (rename("$bdir/$d->[0]", $tmpnam)) {
+	delete $files{$d->[0]};
+        recvlog_print("- $d->[0]");
+        repo_del("$bdir/$d->[0]", $d) if $config_repo;
+        my @s = stat($tmpnam);
+        # check link count, must be 1
+        if (!@s || $s[3] != 1) {
+	  unlink($tmpnam);	# oops
+	} else {
+          fixmodetime($tmpnam, $dto->[2]);
+          @s = stat($tmpnam);
+	  die("$tmpnam: $!\n") unless @s;
+	  my @info = @$d;
+	  splice(@info, 0, 3);
+	  $files{$dto->[0]} = [ $dto->[0], "$s[9]/$s[7]/$s[1]", sprintf("1%03x%08x", ($s[2] & 07777), $s[9]), @info ];
+          recvlog_print("M $dto->[0]");
+	  rename($tmpnam, "$bdir/$dto->[0]") || die("rename $tmpnam $bdir/$dto->[0]: $!\n");
+	  repo_add("$bdir/$dto->[0]", $files{$dto->[0]}) if $config_repo;
+	  # no need to create delta, as file was already in tree...
+	  return;
+	}
+      }
+      undef $d;
+    }
+  }
+
+  if (!$d && @$dto > 5) {
+    my @oldds = grep {@$_ > 5 && $_->[5] eq $dto->[5]} values %files;
+    $d = $oldds[0] if @oldds;
+  }
+
+  $md = $d;	# make delta against this entry ($d may point to repo)
+  my $repo_key = '';
+  my @repo;
+  my $deltaonly;
+
+  if ($config_repo && @$dto > 5) {
+    @repo = repo_search($dto->[5], $dto->[3]);
+    # we must not use the repo if we need to store the deltas.
+    # in this case we will send a delta-only request and retry the
+    # repo if it fails
+    if (@repo && !$rextract && !$config_generate_deltas && $config_keep_deltas) {
+      @repo = repo_check(@repo);
+      $deltaonly = 1 if @repo;
+    }
+  }
+
+##################################################################
+##################################################################
+
+send_again:
+
+  while (@repo && !$deltaonly) {
+    my $rd;
+    my $pn = $dto->[0];
+    $pn =~ s/^.*\///;
+    checkjob($pn) if $runningjob;
+    if ($repo[0]->[0] eq $dto->[3]) {
+      # exact match, great!
+      $tmpnam = "$bdir/drpmsync/wip/$pn";
+      $rd = repo_cp($repo[0], $bdir, "drpmsync/wip/$pn", $extractoff);
+      if (!$rd) {
+	shift @repo;
+	next;
+      }
+      if ($rextract) {
+	recvlog_print("R $pdto0");
+	return;
+      }
+      fixmodetime($tmpnam, $dto->[2]);
+      my @s = stat($tmpnam);
+      die("$tmpnam: $!\n") unless @s;
+      my $oldd5 = $md ? substr($md->[3], 32) : undef;
+      $files{$dto->[0]} = [ $dto->[0], "$s[9]/$s[7]/$s[1]", sprintf("1%03x%08x", ($s[2] & 07777), $s[9]), $rd->[3], $rd->[4], $rd->[5] ];
+      if ($oldd5 && $config_generate_deltas) {
+	recvlog_print("Rm $pdto0");
+	@deltas = makedelta("$bdir/$md->[0]", $tmpnam, "$bdir/drpmsync/wip/$oldd5$files{$dto->[0]}->[3]");
+	save_or_delete_deltas($bdir, $dto->[5], @deltas);
+      } else {
+	recvlog_print("R $pdto0");
+      }
+      rename($tmpnam, "$bdir/$dto->[0]") || die("rename $tmpnam $bdir/$dto->[0]: $!\n");
+      repo_add("$bdir/$dto->[0]", $files{$dto->[0]});
+      return;
+    } elsif (substr($repo[0]->[0], 32, 32) eq substr($dto->[3], 32, 32)) {
+      # have sign only rpm, copy right away
+      checkjob() if $runningjob;
+      $rd = repo_cp($repo[0], $bdir, "drpmsync/wip/repo-$pn");
+      if (!$rd) {
+	shift @repo;
+	next;
+      }
+      $d = $rd;
+      $d->[1] = undef;	# mark as temp, don't gen/save delta
+      $repo_key = 'R';
+      @repo = ();
+    }
+    @repo = repo_check(@repo) if @repo;
+    last;
+  }
+
+  # ok, we really need to send a request our server
+  my $reqext = '';
+  if (@repo && !$deltaonly && !$play_it_safe) {
+    my @h = map {$_->[0]} @repo;
+    unshift @h, $d->[3] if $d && @$d > 5;
+    $reqext .= "&have=" . shift(@h);
+    if (@h) {
+      my %ha = map {substr($_, -32, 32) => 1} @h;
+      $reqext .= "&havealso=" . join(',', keys %ha);
+    }
+  } elsif ($d && @$d > 5 && !$play_it_safe) {
+    $reqext .= "&have=$d->[3]";
+    $reqext .= "&uncombined" if $config_keep_uncombined;
+    $reqext .= "&withrpm" if $config_always_get_rpm && substr($d->[3], 32) ne substr($dto->[3], 32);
+    $reqext .= "&deltaonly" if $deltaonly;
+    $reqext .= "&nocomplexdelta" if (!$config_keep_deltas || $rextract) && $config_always_get_rpm;
+  } else {
+    $reqext .= "&zlib" if $have_zlib;
+    $reqext .= "&fiso" if $config_repo && !$play_it_safe && ($dto->[0] =~ /(?<!\.delta)\.iso$/i);
+  }
+
+  my $pn = $dto->[0];
+  $pn =~ s/^.*\///;
+  die("no file name?\n") unless $pn ne '';
+  checkjob($pn) if $runningjob;
+  $tmpnam = "$bdir/drpmsync/wip/$pn";
+  my $type;
+  ($type, $nd, @deltas) = get_update($dto, $tmpnam, $reqext, $rextract);
+  if ($type eq 'ERR ') {
+    die("$nd\n");
+  } elsif ($type eq 'NODR') {
+    die("unexpected NODR answer\n") unless $deltaonly;
+    $deltaonly = 0;
+    goto send_again;
+  } elsif ($type eq 'GONE') {
+    warn("$dto->[0] is gone\n");
+    recvlog_print("${repo_key}G $pdto0");
+    if (-e "$bdir/$dto->[0]") {
+      unlink("$bdir/$dto->[0]") || die("unlink $bdir/$dto->[0]: $!\n");
+    }
+    delete $files{$dto->[0]};
+    $had_gone = 1;
+  } elsif ($type eq 'FILZ') {
+    recvlog_print("${repo_key}z $pdto0");
+    rename($tmpnam, "$bdir/$dto->[0]") || die("rename $tmpnam $bdir/$dto->[0]: $!\n");
+    $files{$dto->[0]} = $nd;
+  } elsif ($type eq 'FILE') {
+    recvlog_print("${repo_key}f $pdto0");
+    rename($tmpnam, "$bdir/$dto->[0]") || die("rename $tmpnam $bdir/$dto->[0]: $!\n");
+    $files{$dto->[0]} = $nd;
+  } elsif ($type eq 'FISO') {
+    checkjob() if $runningjob;
+    recvlog_print("${repo_key}i $pdto0");
+    if (!update_fiso($bdir, $pn, $dto, $nd->[2])) {
+      $play_it_safe = 1;
+      goto send_again;
+    }
+  } elsif ($type eq 'RPM ') {
+    if (!$nd->[0]) {
+      checkjob() if $runningjob;
+      die("no deltas?") unless @deltas;
+      undef $d if $d && (@$d <= 4 || substr($d->[3], 32, 32) ne substr($deltas[0], -96, 32));
+      if (!$d && @repo) {
+	my $dmd5 = substr($deltas[0], -96, 32);
+        my @mrepo = grep {substr($_->[0], 32, 32) eq $dmd5} @repo;
+	for my $rd (@mrepo) {
+	  $d = repo_cp($rd, $bdir, "drpmsync/wip/repo-$pn");
+	  last if $d;
+	}
+	if (!$d && @mrepo) {
+	  recvlog_print("R! $pdto0");
+	  save_or_delete_deltas($bdir, undef, @deltas);
+          @repo = grep {substr($_->[0], 32, 32) ne $dmd5} @repo;
+	  goto send_again;	# now without bad repo entries
+	}
+	$d->[1] = undef if $d;
+        $repo_key = 'R';
+      }
+      if (@deltas == 1 && substr($deltas[0], -96, 32) eq substr($deltas[0], -32, 32)) {
+	recvlog_print("${repo_key}s $pdto0");
+      } else {
+	recvlog_print("${repo_key}d $pdto0");
+      }
+      die("received delta doesn't match request\n") unless $d;
+
+#######################################################################
+
+      if (1) {
+	my $job = {};
+	$job->{'d'} = $d;
+	$job->{'nd'} = $nd;
+	$job->{'md'} = $md;
+	$job->{'pdto0'} = $pdto0;
+	$job->{'tmpnam'} = $tmpnam;
+	$job->{'extractoff'} = $extractoff;
+        $job->{'wip'} = $pn;
+        $job->{'finish'} = \&update;
+        $job->{'finishargs'} = [$bdir, $dto, $rextract, $job];
+        @deltas = applydeltas($job, "$bdir/$d->[0]", $tmpnam, $extractoff, @deltas);
+	if (@deltas) {
+	    $runningjob = $job;
+	    return;
+	}
+        delete $job->{'finishargs'};	# break circ ref
+      }
+
+#######################################################################
+
+      #recvlog("applying deltarpm to $d->[0]");
+      #@deltas = applydeltas("$bdir/$d->[0]", $tmpnam, $extractoff, @deltas);
+applydeltas_finished:
+      if (!@deltas) {
+	return update($bdir, $dto, $rextract, 1);
+      }
+      if (!$rextract) {
+        fixmodetime($tmpnam, $nd->[2]);
+        my @s = stat($tmpnam);
+        die("$tmpnam: $!\n") unless @s;
+        $sabytes += $s[7];
+        $nd = [ $dto->[0], "$s[9]/$s[7]/$s[1]", sprintf("1%03x%08x", ($s[2] & 07777), $s[9]), rpminfo($tmpnam) ];
+      }
+    } else {
+      recvlog_print("${repo_key}r $pdto0") if $rextract || !(!@deltas && $md && $md->[1] && $config_generate_deltas);
+    }
+    if ($rextract) {
+      save_or_delete_deltas($bdir, undef, @deltas);
+      unlink("$bdir/$d->[0]") if $d && ($d->[0] =~ m!drpmsync/wip/repo-!);
+      return;
+    }
+    if (@deltas && $d && !$d->[1]) {
+      # deltas made against some repo rpm, always delete
+      save_or_delete_deltas($bdir, undef, @deltas);
+      @deltas = ();
+    }
+    if (!@deltas && $md && $md->[1] && $config_generate_deltas) {
+      recvlog_print("${repo_key}m $pdto0");
+      @deltas = makedelta("$bdir/$md->[0]", $tmpnam, "$bdir/drpmsync/wip/".substr($md->[3], 32).$nd->[3]);
+    }
+    save_or_delete_deltas($bdir, $dto->[5], @deltas);
+
+    rename($tmpnam, "$bdir/$dto->[0]") || die("rename $tmpnam $bdir/$dto->[0]: $!\n");
+    $files{$dto->[0]} = $nd;
+    repo_add("$bdir/$dto->[0]", $nd) if $config_repo;
+  } else {
+    die("received strange answer type: $type\n");
+  }
+  unlink("$bdir/$d->[0]") if $d && ($d->[0] =~ m!drpmsync/wip/repo-!);
+}
+
+sub fixmodetime {
+  my ($fn, $mthex) = @_;
+  my $mode = hex(substr($mthex, 1, 3));
+  my $ti = hex(substr($mthex, 4, 8));
+  chmod($mode, $fn) == 1 || die("chmod $fn: $!\n");
+  utime($ti, $ti, $fn) == 1 || die("utime $fn: $!\n");
+}
+
+my $cmdline_cf;
+my $cmdline_source;
+my $cmdline_repo;
+my $cmdline_repo_add;
+my $cmdline_repo_validate;
+my $cmdline_get_filelist;
+my $cmdline_use_filelist;
+my $cmdline_norecurse;
+my $cmdline_list;
+my @cmdline_filter;
+my @cmdline_filter_arch;
+
+sub find_source {
+  my ($syncfilesp, $norecurse, $verbose, @sources) = @_;
+  my %errors;
+
+  if (!@sources) {
+    setup_proto('null');
+    @$syncfilesp = ();
+    return;
+  }
+  for my $s (@sources) {
+    $syncurl = $s;
+    my $ss = $s;
+    $syncproto = 'drpmsync';
+    if ($ss =~ /^(file|drpmsync|rsync):(.*)$/) {
+      $syncproto = lc($1);
+      $ss = $2;
+      if ($syncproto ne 'file') {
+        $ss =~ s/^\/\///;
+        if ($ss =~ /^([^\/]+)\@(.*)$/) {
+          $syncuser = $1;
+          $ss = $2;
+          ($syncuser, $syncpassword) = split(':', $syncuser, 2);
+        }
+      }
+    }
+    if ($syncproto eq 'file') {
+      $syncroot = $ss;
+      $syncroot =~ s/\/\.$//;
+      $syncroot =~ s/\/$// unless $syncroot eq '/';
+    } else {
+      ($syncaddr, $syncport, $syncroot) = $ss =~ /^([^\/]+?)(?::(\d+))?(\/.*)$/;
+      if (!$syncaddr) {
+        $errors{$s} = "bad url";
+        next;
+      }
+      $syncroot =~ s/\/\.$//;
+      $syncroot =~ s/\/$// unless $syncroot eq '/';
+      $esyncroot = aescape($syncroot);
+      $syncport ||= $syncproto eq 'rsync' ? 873 : 80;
+      $syncaddr = inet_aton($syncaddr);
+      if (!$syncaddr) {
+        $errors{$s} = "could not resolve host";
+        next;
+      }
+      print "trying $s\n" if $verbose;
+    }
+    eval {
+      setup_proto($syncproto);
+      @$syncfilesp = get_syncfiles($norecurse);
+    };
+    alarm(0) if $config_timeout;
+    last unless $@;
+    $errors{$s} = "$@";
+    $errors{$s} =~ s/\n$//s;
+    undef $syncaddr;
+  }
+  if ($syncproto ne 'file' && !$syncaddr) {
+    if (@sources == 1) {
+      die("could not connect to $sources[0]: $errors{$sources[0]}\n");
+    } else {
+      print STDERR "could not connect to any server:\n";
+      print STDERR "  $_: $errors{$_}\n" for @sources;
+      exit(1);
+    }
+  }
+  filelist_apply_filter($syncfilesp);
+  filelist_apply_filter_arch($syncfilesp);
+}
+
+sub filelist_from_file {
+  my ($flp, $fn) = @_;
+
+  local *FL;
+  if ($fn eq '-') {
+    open(FL, '<&STDIN') || die("STDIN dup: $!\n");
+  } else {
+    open(FL, '<', $fn) || die("$fn: $!\n");
+  }
+  my $fldata;
+  my $data;
+  my $is_compressed;
+  die("not a drpmsync filelist\n") if read(FL, $data, 32) != 32;
+  if (substr($data, 0, 2) eq "\037\213") {
+    { local $/; $data .= <FL>; }
+    $data = Compress::Zlib::memGunzip($data);
+    die("filelist uncompress error\n") unless defined $data;
+    $is_compressed = 1;
+  }
+  die("not a drpmsync filelist\n") if (substr($data, 0, 24) ne 'DRPMSYNC0001SYNC00000000' && substr($data, 0, 24) ne 'DRPMSYNC0001SYNZ00000000');
+  if ($is_compressed) {
+    $fldata = substr($data, 32);
+    $data = substr($data, 0, 32);
+  } else {
+    { local $/; $fldata = <FL>; }
+  }
+  close FL;
+  my $md5 = substr($fldata, -32, 32);
+  $fldata = substr($fldata, 0, -32);
+  die("drpmsync filelist checksum error\n") if Digest::MD5::md5_hex($fldata) ne $md5;
+  $fldata = substr($fldata, 12);
+  if (substr($data, 16, 4) eq 'SYNZ') {
+    die("cannot uncompress filelist\n") unless $have_zlib;
+    $fldata = Compress::Zlib::uncompress($fldata);
+  }
+  @$flp = drpmsync_get_syncfiles($cmdline_norecurse, $fldata);
+  filelist_apply_filter($flp);
+  filelist_apply_filter_arch($flp);
+}
+
+while (@ARGV) {
+  last if $ARGV[0] !~ /^-/;
+  my $opt = shift @ARGV;
+  last if $opt eq '--';
+  if ($opt eq '-c') {
+    die("-c: argument required\n") unless @ARGV;
+    $cmdline_cf = shift @ARGV;
+  } elsif ($opt eq '--repo') {
+    die("--repo: argument required\n") unless @ARGV;
+    $cmdline_repo = shift @ARGV;
+  } elsif ($opt eq '--repo-add') {
+    $cmdline_repo_add = 1;
+  } elsif ($opt eq '--repo-validate') {
+    $cmdline_repo_validate = 1;
+  } elsif ($opt eq '--norecurse-validate') {
+    $cmdline_norecurse = 1;
+  } elsif ($opt eq '--list') {
+    $cmdline_list = 1;
+    $cmdline_norecurse = 1;
+  } elsif ($opt eq '--list-recursive') {
+    $cmdline_list = 1;
+  } elsif ($opt eq '--get-filelist') {
+    die("--get-filelist: argument required\n") unless @ARGV;
+    $cmdline_get_filelist = shift @ARGV;
+  } elsif ($opt eq '--filelist-synctree') {
+    $synctree = shift @ARGV;
+    $synctree .= '/';
+  } elsif ($opt eq '--use-filelist') {
+    die("--use-filelist: argument required\n") unless @ARGV;
+    $cmdline_use_filelist = shift @ARGV;
+  } elsif ($opt eq '--exclude') {
+    die("--exclude: argument required\n") unless @ARGV;
+    push @cmdline_filter, '-'.shift(@ARGV);
+  } elsif ($opt eq '--include') {
+    die("--include: argument required\n") unless @ARGV;
+    push @cmdline_filter, '+'.shift(@ARGV);
+  } elsif ($opt eq '--exclude-arch') {
+    die("--exclude-arch: argument required\n") unless @ARGV;
+    push @cmdline_filter_arch, '-'.shift(@ARGV);
+  } elsif ($opt eq '--include-arch') {
+    die("--include-arch: argument required\n") unless @ARGV;
+    push @cmdline_filter_arch, '+'.shift(@ARGV);
+  } else {
+    die("$opt: unknown option\n");
+  }
+}
+
+if ($cmdline_repo_validate) {
+  my $basedir;
+  $basedir = shift @ARGV if @ARGV;
+  die("illegal source parameter for repo operation\n") if @ARGV;
+  if (defined($cmdline_cf) || (defined($basedir) && -e "$basedir/drpmsync/config")) {
+    readconfig_client(defined($cmdline_cf) ? $cmdline_cf : "$basedir/drpmsync/config");
+  }
+  $config_repo = $cmdline_repo if defined $cmdline_repo;
+  die("--repo-validate: no repo specified\n") unless $config_repo;
+  repo_validate();
+  exit(0);
+}
+
+my $basedir;
+if (@ARGV == 2) {
+  die("illegal source parameter for repo operation\n") if $cmdline_repo_add;
+  $cmdline_source = shift @ARGV;
+  $basedir = $ARGV[0];
+} elsif (@ARGV == 1) {
+  if ($cmdline_list || defined($cmdline_get_filelist)) {
+    $cmdline_source = $ARGV[0];
+  } else {
+    $basedir = $ARGV[0];
+  }
+} else {
+  die("Usage: drpmsync [-c config] [source] <dir> | -s <serverconfig>\n") unless $cmdline_list && defined($cmdline_use_filelist);
+}
+
+if (defined($basedir)) {
+  if (-f $basedir) {
+    die("$basedir: not a directory (did you forget -s?)\n");
+  }
+  mkdir_p($basedir);
+}
+
+if (defined($cmdline_cf)) {
+  readconfig_client($cmdline_cf);
+} elsif (defined($basedir) && (-e "$basedir/drpmsync/config")) {
+  readconfig_client("$basedir/drpmsync/config");
+}
+
+@config_source = $cmdline_source if defined $cmdline_source;
+$config_repo = $cmdline_repo if defined $cmdline_repo;
+@filter_comp = compile_filter(@cmdline_filter, @config_filter);
+@filter_arch_comp = compile_filter(@cmdline_filter_arch, @config_filter_arch);
+
+if ($config_repo && defined($basedir)) {
+  my $nbasedir = `cd $basedir && /bin/pwd`;
+  chomp $nbasedir;
+  die("could not canonicalize $basedir\n") if !$nbasedir || !-d "$nbasedir";
+  $basedir = $nbasedir;
+}
+
+if ($cmdline_repo_add) {
+  die("--repo-add: no repo specified\n") unless $config_repo;
+  die("need a destination\n") unless defined $basedir;
+  readcache("$basedir/drpmsync/cache");
+  print "getting state of local tree...\n";
+  findfiles($basedir, '');
+  print("cache:  $cachehits hits, $cachemisses misses\n");
+  for my $d (@files) {
+    repo_add("$basedir/$d->[0]", $d);
+  }
+  exit(0);
+}
+
+if (defined($cmdline_get_filelist)) {
+  die("need a source for get-filelist\n") unless @config_source;
+  $SIG{'ALRM'} = sub {die("network timeout\n");};
+  my @syncfiles;
+  find_source(\@syncfiles, $cmdline_norecurse, $cmdline_get_filelist eq '-' ? 0 : 1, @config_source);
+  send_fin();
+  filelist_from_file(\@syncfiles, $cmdline_use_filelist) if defined $cmdline_use_filelist;
+  local *FL;
+  if ($cmdline_get_filelist eq '-') {
+    open(FL, '>&STDOUT') || die("STDOUT dup: $!\n");
+  } else {
+    open(FL, '>', $cmdline_get_filelist) || die("$cmdline_get_filelist: $!\n");
+  }
+  my $data;
+  $data = pack('H*', "$newstamp1$newstamp2");
+  $data = pack("Nw/a*w/a*", scalar(@syncfiles), $synctree ne '/' ? substr($synctree, 0, -1) : '/', $data);
+  $data = sprintf("1%03x%08x", 0644, time()).$data;
+  for (@syncfiles) {
+    my @l = @$_;
+    my $b;
+    if (@l > 5) {
+      $b = pack('H*', "$l[2]$l[3]$l[4]").$l[5];
+    } elsif (@l > 3) {
+      if ($l[3] eq 'x') {
+        $b = pack('H*', $l[2])."\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0";
+      } else {
+        $b = pack('H*', "$l[2]$l[3]");
+      }
+    } else {
+      $b = pack('H*', $l[2]);
+    }
+    $data .= pack("w/a*w/a*", $l[0], $b);
+  }
+  $data = "DRPMSYNC0001SYNC00000000".sprintf("%08x", length($data)).$data.Digest::MD5::md5_hex($data);
+  print FL $data;
+  close(FL) || die("close: $!\n");
+  exit(0);
+}
+
+if ($cmdline_list) {
+  $SIG{'ALRM'} = sub {die("network timeout\n");};
+  my @syncfiles;
+  find_source(\@syncfiles, $cmdline_norecurse, 0, @config_source);
+  send_fin();
+  filelist_from_file(\@syncfiles, $cmdline_use_filelist) if defined $cmdline_use_filelist;
+  for my $f (@syncfiles) {
+    my $p = substr($f->[2], 0, 1) eq '0' ? '/' : '';
+    print "$f->[0]$p\n";
+  }
+  exit(0);
+}
+
+# get the lock
+
+die("need a destination\n") unless defined $basedir;
+mkdir_p("$basedir/drpmsync");
+sysopen(LOCK, "$basedir/drpmsync/lock", POSIX::O_RDWR|POSIX::O_CREAT, 0666) || die("$basedir/drpmsync/lock: $!\n");
+if (!flock(LOCK, LOCK_EX | LOCK_NB)) {
+  my $lockuser = '';
+  sysread(LOCK, $lockuser, 1024);
+  close LOCK;
+  $lockuser = "somebody else\n" unless $lockuser =~ /.*[\S].*\n$/s;
+  print "update already in progress by $lockuser";
+  exit(1);
+}
+truncate(LOCK, 0);
+syswrite(LOCK, "drpmsync[$$]\@$synchost\n");
+
+my ($oldstamp1, $oldstamp2);
+if (open(STAMP, '<', "$basedir/drpmsync/timestamp")) {
+  my $s = '';
+  if ((sysread(STAMP, $s, 16) || 0) == 16 && $s !~ /[^0-9a-f]/) {
+    $oldstamp1 = substr($s, 0, 8);
+    $oldstamp2 = substr($s, 8, 8);
+  }
+  close STAMP;
+}
+$oldstamp1 ||= "00000000";
+
+# clear the wip
+if (opendir(WIP, "$basedir/drpmsync/wip")) {
+  for (readdir(WIP)) {
+    next if $_ eq '.' || $_ eq '..';
+    unlink("$basedir/drpmsync/wip/$_") || die("unlink $basedir/drpmsync/wip/$_: $!\n");
+  }
+  closedir(WIP);
+}
+
+readcache("$basedir/drpmsync/cache");
+print "getting state of local tree...\n";
+findfiles($basedir, '', 1);
+print("cache:  $cachehits hits, $cachemisses misses\n");
+writecache("$basedir/drpmsync/cache");
+
+if (!@config_source) {
+  # just a cache update...
+  unlink("$basedir/drpmsync/lock");
+  close(LOCK);
+  exit(0);
+}
+
+mkdir_p("$basedir/drpmsync/wip");
+
+$SIG{'ALRM'} = sub {die("network timeout\n");};
+
+my @syncfiles;
+find_source(\@syncfiles, $cmdline_norecurse || $cmdline_use_filelist, 1, @config_source);
+filelist_from_file(\@syncfiles, $cmdline_use_filelist) if defined $cmdline_use_filelist;
+
+$config_recvlog = "$basedir/drpmsync/$config_recvlog" if $config_recvlog && $config_recvlog !~ /^\//;
+if ($config_recvlog) {
+  open(RECVLOG, '>>', $config_recvlog) || die("$config_recvlog: $!\n");
+  select(RECVLOG);
+  $| = 1;
+  select(STDOUT);
+  recvlog("started update from $syncurl");
+  $SIG{'__DIE__'} = sub {
+    my $err = $_[0];
+    $err =~ s/\n$//s;
+    recvlog($err);
+    die("$err\n");
+  };
+}
+
+if ($oldstamp1 ne '00000000' && $oldstamp1 gt $newstamp1) {
+  if ($newstamp1 eq '00000000') {
+    die("remote tree is incomplete\n");
+  }
+  die("remote tree is older than local tree (last completion): ".toiso(hex($newstamp1))." < ".toiso(hex($oldstamp1))."\n");
+}
+if ($oldstamp2 && $oldstamp2 gt $newstamp2) {
+  die("remote tree is older than local tree (last start): ".toiso(hex($newstamp2))." < ".toiso(hex($oldstamp2))."\n");
+}
+open(STAMP, '>', "$basedir/drpmsync/timestamp.new") || die("$basedir/drpmsync/timestamp.new: $!\n");
+print STAMP "$oldstamp1$newstamp2\n";
+close STAMP;
+rename("$basedir/drpmsync/timestamp.new", "$basedir/drpmsync/timestamp");
+
+# change all directories to at least user rwx
+for (@syncfiles) {
+  next if $_->[2] !~ /^0/;
+  next if (hex(substr($_->[2], 0, 4)) & 0700) == 0700;
+  $_->[2] = sprintf("0%03x", hex(substr($_->[2], 0, 4)) | 0700).substr($_->[2], 4);
+}
+
+printf "local:  ".@files." entries\n";
+printf "remote: ".@syncfiles." entries\n";
+
+rsync_adapt_filelist(\@syncfiles) if $syncproto eq 'rsync';
+
+%files = map {$_->[0] => $_} @files;
+%syncfiles = map {$_->[0] => $_} @syncfiles;
+
+# 1) create all new directories
+# 2) delete all dirs that are now files
+# 3) get all rpms and update/delete the associated files
+# 4) update all other files
+# 5) delete all files/rpms/directories
+# 6) set mode/time of directories
+
+# part 1
+for my $dir (grep {@$_ == 3} @syncfiles) {
+  my $d = $files{$dir->[0]};
+  if ($d) {
+    next if $d->[2] =~ /^0/;
+    recvlog_print("- $d->[0]");
+    unlink("$basedir/$d->[0]") || die("unlink $basedir/$d->[0]: $!\n");
+  }
+  recvlog_print("+ $dir->[0]");
+  mkdir("$basedir/$dir->[0]", 0755) || die("mkdir $basedir/$dir->[0]: $!\n");
+  fixmodetime("$basedir/$dir->[0]", $dir->[2]);
+  my @s = lstat("$basedir/$dir->[0]");
+  die("$basedir/$dir->[0]: $!\n") unless @s;
+  $files{$dir->[0]} = [ $dir->[0], "$s[9]/$s[7]/$s[1]", sprintf("0%03x%08x", ($s[2] & 07777), $s[9]) ];
+  dirchanged($dir->[0]);
+}
+
+# part 2
+@files = sort {$a->[0] cmp $b->[0]} values %files;
+for my $dir (grep {@$_ == 3} @files) {
+  my $sd = $syncfiles{$dir->[0]};
+  next if !$sd || $sd->[2] =~ /^0/;
+  next unless $files{$dir->[0]};
+  my @subf = grep {$_->[0] =~ /^\Q$dir->[0]\E\//} @files;
+  unshift @subf, $dir;
+  @subf = reverse @subf;
+  for my $subf (@subf) {
+    recvlog_print("- $subf->[0]");
+    if ($subf->[2] =~ /^0/) {
+      rmdir("$basedir/$subf->[0]") || die("rmdir $basedir/$subf->[0]: $!\n");
+    } else {
+      unlink("$basedir/$subf->[0]") || die("unlink $basedir/$subf->[0]: $!\n");
+    }
+    repo_del("$basedir/$subf->[0]", $subf) if $config_repo;
+    delete $files{$subf->[0]};
+  }
+  dirchanged($dir->[0]);
+  @files = sort {$a->[0] cmp $b->[0]} values %files;
+}
+
+# part 3
+my @syncrpms = grep {@$_ > 5} @syncfiles;
+# sort by rpm built date
+@syncrpms = sort {$a->[4] cmp $b->[4]} @syncrpms;
+for my $rpm (@syncrpms) {
+  update($basedir, $rpm);
+  # update meta file(s)
+  my $rpmname = $rpm->[0];
+  $rpmname =~ s/\.[sr]pm$//;
+  for my $afn ("$rpmname.changes", "$rpmname-MD5SUMS.meta", "$rpmname-MD5SUMS.srcdir") {
+    my $sd = $syncfiles{$afn};
+    my $d = $files{$afn};
+    next if !$d && !$sd;
+    if ($d && !$sd) {
+      next if $d->[2] =~ /^0/;
+      recvlog_print("- $d->[0]");
+      unlink("$basedir/$d->[0]") || die("unlink $basedir/$d->[0]: $!\n");
+      dirchanged($d->[0]);
+      delete $files{$d->[0]};
+    } else {
+      update($basedir, $sd);
+    }
+  }
+}
+
+# part 4
+for my $file (grep {@$_ == 4} @syncfiles) {
+  update($basedir, $file);
+}
+
+checkjob() if $runningjob;
+
+send_fin();
+
+# part 5
+@files = sort {$a->[0] cmp $b->[0]} values %files;
+for my $file (grep {!$syncfiles{$_->[0]}} reverse @files) {
+  recvlog_print("- $file->[0]");
+  if ($file->[2] =~ /^0/) {
+    rmdir("$basedir/$file->[0]") || die("rmdir $basedir/$file->[0]: $!\n");
+  } else {
+    unlink("$basedir/$file->[0]") || die("unlink $basedir/$file->[0]: $!\n");
+    repo_del("$basedir/$file->[0]", $file) if $config_repo;
+  }
+  dirchanged($file->[0]);
+  delete $files{$file->[0]};
+}
+
+# part 6
+for my $dir (grep {@$_ == 3} @syncfiles) {
+  my $d = $files{$dir->[0]};
+  next if !$d || $d->[2] eq $dir->[2];
+  fixmodetime("$basedir/$dir->[0]", $dir->[2]);
+}
+
+@files = sort {$a->[0] cmp $b->[0]} values %files;
+writecache("$basedir/drpmsync/cache");
+
+if (!$had_gone) {
+  open(STAMP, '>', "$basedir/drpmsync/timestamp.new") || die("$basedir/drpmsync/timestamp.new: $!\n");
+  print STAMP "$newstamp1$newstamp2\n";
+  close STAMP;
+  rename("$basedir/drpmsync/timestamp.new", "$basedir/drpmsync/timestamp");
+}
+
+if (defined($config_delta_max_age)) {
+  print "removing outdated deltas...\n";
+  my $nold = 0;
+  my $cut = time() - 24*60*60*$config_delta_max_age;
+  if (opendir(PACKS, "$basedir/drpmsync/deltas")) {
+    my @packs = readdir(PACKS);
+    closedir(PACKS);
+    for my $pack (@packs) {
+      next if $pack eq '.' || $pack eq '..';
+      next unless opendir(DELTAS, "$basedir/drpmsync/deltas/$pack");
+      my @deltas = readdir(DELTAS);
+      closedir(DELTAS);
+      for my $delta (@deltas) {
+	next if $delta eq '.' || $delta eq '..';
+        my @s = stat "$basedir/drpmsync/deltas/$pack/$delta";
+        next unless @s;
+        next if $s[9] >= $cut;
+        unlink("$basedir/drpmsync/deltas/$pack/$delta") || die("unlink $basedir/drpmsync/deltas/$pack/$delta: $!\n");
+	$nold++;
+      }
+    }
+  }
+  recvlog_print("removed $nold deltarpms") if $nold;
+}
+my $net_kbsec = 0;
+$net_kbsec = int($net_recv_bytes / 1024 / $net_spent_time) if $net_spent_time;
+recvlog("update finished $txbytes/$rvbytes/$sabytes $net_kbsec");
+close(RECVLOG) if $config_recvlog;
+unlink("$basedir/drpmsync/lock");
+close(LOCK);
+if ($sabytes == 0) {
+  printf "update finished, sent %.1f K, received %.1f M\n", $txbytes / 1000, $rvbytes / 1000000;
+} elsif ($sabytes < 0) {
+  printf "update finished, sent %.1f K, received %.1f M, deltarpm excess %.1f M\n", $txbytes / 1000, $rvbytes / 1000000, (-$sabytes) /1000000;
+} else {
+  printf "update finished, sent %.1f K, received %.1f M, deltarpm savings %.1f M\n", $txbytes / 1000, $rvbytes / 1000000, $sabytes /1000000;
+}
+printf "network throughput %d kbyte/sec\n", $net_kbsec if $net_spent_time; 
+exit 24 if $had_gone;

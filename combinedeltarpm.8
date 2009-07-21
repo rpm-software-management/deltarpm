@@ -1,0 +1,47 @@
+.\" man page for combinedeltarpm
+.\" Copyright (c) 2005 Michael Schroeder <mls@suse.de>
+.\" See LICENSE.BSD for license
+.TH COMBINEDELTARPM 8 "May 2005"
+.SH NAME
+combindeltarpm \- combine multiple deltarpms to a single one
+
+.SH SYNOPSIS
+.B combinedeltarpm
+.RB [ -v ]
+.RB [ -V
+.IR version ]
+.RB [ -z
+.IR compression ]
+.RB [ -S
+.IR signaturerpm ]
+.I olddeltarpms...
+.I newdeltarpm
+
+.SH DESCRIPTION
+combinedeltarpm creates a new deltarpm from multiple old ones.
+Applying the rsulting deltarpm has the same effect as applying
+each of the old ones in the specifed order. Use the
+.B -v
+option to make combinedeltarpm more verbose about its work.
+.PP
+combinedeltarpm normally produces a V3 format deltarpm, use the
+.B -V
+option to specify a different version if desired. The
+.B -z
+option can be used to specify a different compression method, the
+default is to use the same compression method as used in the
+last of the old deltarpms.
+.PP
+If you want to use a different header
+signature you can also specify a rpm with the
+.B -S
+option which will be used as signature reference. This feature can
+be used to if a deltarpm was made against an unsigned rpm which
+later got signed.
+
+.SH SEE ALSO
+.BR makedeltarpm (8)
+.BR applydeltarpm (8)
+
+.SH AUTHOR
+Michael Schroeder <mls@suse.de>

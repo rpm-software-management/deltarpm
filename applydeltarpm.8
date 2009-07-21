@@ -1,0 +1,73 @@
+.\" man page for applydeltarpm
+.\" Copyright (c) 2005 Michael Schroeder <mls@suse.de>
+.\" See LICENSE.BSD for license
+.TH APPLYDELTARPM 8 "Feb 2005"
+.SH NAME
+applydeltarpm \- reconstruct an rpm from a deltarpm
+
+.SH SYNOPSIS
+.B applydeltarpm
+.RB [ -v ]
+.RB [ -p ]
+.RB [ -r
+.IR oldrpm ]
+.I deltarpm
+.I newrpm
+.br
+.B applydeltarpm
+.BR -c | -C
+.I deltarpm
+.br
+.B applydeltarpm
+.RB [ -c | -C ]
+.B -s
+.I sequence
+.br
+.B applydeltarpm
+.BR -i
+.I deltarpm
+
+.SH DESCRIPTION
+applydeltarpm applies a binary delta to either an old rpm or to
+on-disk data to re-create a new rpm. The old rpm can be specified
+with the
+.B -r
+option, if no rpm name is provided on-disk data is used. You
+can use
+.B -p
+to make applydeltarpm print the percentage of completion, or
+.B -v
+to make it more verbose about its operation.
+
+The second an third form can be used to check if the reconstruction
+is possible. It may fail if the on-disk data got changed
+(deltarpms are created in a way that config file changes do not
+matter) or the deltarpm does not match the rpm the delta was generated
+with. The
+.B -c
+option selects full (i.e. slow) on-disk checking, whereas
+.B -C
+only checks if the filesizes have not changed.
+
+Instead of a full deltarpm a sequence id can be given with the
+.B -s
+.I sequence
+option. Such an id contains all the information that is needed to
+do reconstruction checking.
+
+Finally information about a deltarpm can be printed with
+the
+.B -i
+option.
+
+.SH EXIT STATUS
+applydeltarpm returns 0 if the rpm could be recreated or the
+checking succeeded, it returns 1 and prints an error message
+to stderr if something failed.
+
+.SH SEE ALSO
+.BR makedeltarpm (8),
+.BR rpm (8)
+
+.SH AUTHOR
+Michael Schroeder <mls@suse.de>

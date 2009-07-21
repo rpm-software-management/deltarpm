@@ -1,0 +1,276 @@
+.\" man page for drpmsync
+.\" Copyright (c) 2005 Michael Schroeder <mls@suse.de>
+.\" See LICENSE.BSD for license
+.TH DRPMSYNC 8 "Jun 2005"
+drpmsync \- sync a file tree with deltarpms
+
+.SH SYNOPSIS
+.B drpmsync
+.RB [ -c
+.IR config ]
+.RI [ source ]
+.I dir
+.br
+.B drpmsync
+.RB [ -s | -S ]
+.I serverconfig
+.br
+.B cgi-bin/drpmsync
+
+.SH DESCRIPTION
+Drpmsync keeps a local file system tree in sync with a remote one.
+Its intended use is to work with rpm trees; the deltarpm technology
+can only save bandwidth if rpms get transmitted. Please use the
+rsync program for normal file trees.
+
+Drpmsync can run in two modes: as a client it connects to a server,
+receives a file list and brings the tree up to date, as a server
+it answers incoming requests and transmits files and rpms.
+
+.SH CLIENT MODE
+In this mode drpmsync updates the tree in
+.IR dir .
+It opens the configuration file
+.IB dir /drpmsync/config
+to get information about which server to use and other settings.
+You can specify a different configuration file with the
+.B -c
+option.
+The following settings are understood (the default for the boolean
+settings is false):
+.sp
+.ne 3
+.B source:
+.I server1
+.IR server2 ...
+.PP
+This is a list of servers to connect to. Drpmsync advances through
+this list until a working server is found. If a source is specified
+on the command line it is used instead of the one from the
+configuration. The syntax for the server entries is
+"\fIhost\fP[\fB:\fP\fIport\fP]/\fItree\fP".
+.sp
+.ne 3
+.B log:
+.I logfile
+.PP
+Specifies the name of a logfile. If the name does not start with
+a slash,
+.IB dir /drpmsync/
+is prepended to it.
+.sp
+.ne 3
+.B generate_deltas:
+.BR true|false
+.PP
+Controls whether drpmsync generates a delta if it receives a new
+version of a rpm and the server doesn't provide a delta. This
+is only useful if the local tree is also exported to other clients
+via a local drpmsync server.
+.sp
+.ne 3
+.B generate_delta_compression:
+.I comp
+.PP
+This parameter is forwarded to the makedeltarpm program when
+creating deltas. An example would be
+.BR gzip,gzip .
+.sp
+.ne 3
+.B keep_deltas:
+.BR true|false
+.PP
+Tell drpmsync to save received or freshly created deltas to the
+.IB dir /drpmsync/delta
+directory. Automatically true if
+.B generate_deltas
+or
+.B keep_uncombined
+is set to true.
+.sp
+.ne 3
+.B keep_uncombined:
+.BR true|false
+.PP
+This tells drpmsync to request uncombined deltas from the server instead
+of a precombined single delta. This makes sense if you re-export the
+tree and want to maximize the number of versions your clients can
+update from.
+.sp
+.ne 3
+.B always_get_rpm:
+.BR true|false
+.PP
+Configures whether drpmsync should request that the full rpm is
+always sent along with the delta. Only makes sense if you have a
+fast network connection so that applydeltarpm takes longer than
+transmitting the ful rpm.
+.sp
+.ne 3
+.B deltarpmpath:
+.I path
+.PP
+Sets the directory where drpmsync searches for the deltarpm programs.
+The default is to search the
+.B $PATH
+variable.
+
+.SH SERVER MODE
+Drpmsync can wither work as CGI script or as a standalone server.
+CGI script mode is automatically selected if the
+.B REQUEST_METHOD
+environment variable is set. In this mode drpmsync expects the
+.B DRPMSYNC_CONFIG
+environment variable to contain the path to a server config file.
+For apache you can set this with the
+.B SetEnv
+directive.
+
+Standalone mode is selected with the
+.B -s
+or
+.B -S
+option. In this mode the server configuration must be specified as
+an argument to the drpmsync program. The
+.B -s
+option makes the drpmsync program background itself and exit right
+away, while
+.B -S
+keeps the server in the foreground.
+
+The server configuration can contain the following settings:
+.sp
+.ne 3
+.B allow:
+.I pattern1
+.IR pattern2 ...
+.br
+.B deny:
+.I pattern1
+.IR pattern2 ...
+.PP
+This provides the access control for the server.
+.I pattern
+can either be a simple glob pattern (only
+.B *
+is supported) or it can be a full regular expression if it is written
+as
+.BR /RE/ .
+The regular expression is automatically anchored at the start and the
+end. Examples are
+.B 10.10.*
+or
+.BR /10\e.10\e..*/
+If either the numerical ip address or the domain name of the client
+matches any entry of the deny list, access is forbidden. Otherwise
+the allow list is searched for a match. If none is found, access
+is also denied. The default setting for both lists is empty, so
+you have to provide an allow list to allow access for the clients.
+.sp
+.ne 3
+.B log:
+.I logfile
+.PP
+Specifies the path of a logfile.
+.sp
+.ne 3
+.B no_combine:
+.BR true|false
+.PP
+If this setting is true the server does not combine deltarpms.
+This increases to amount of data that has to be transfered but
+reduces the processor load on the server.
+.sp
+.ne 3
+.B tree:
+.I external_path
+.I internal_path
+.PP
+This statements exports the tree located at
+.I internal_path
+to the clients as directory
+.IR external_path .
+All of the above settings are saved as settings of this particular
+tree, so different trees can use different configurations. This
+also means that the configuration directives of a tree must be
+above the
+.B tree
+statement.
+.sp
+.sp
+.ne 3
+The following settings are global and only needed for standalone mode:
+.sp
+.ne 3
+.B serverlog:
+.I logfile
+.PP
+Specifies the path of a logfile used for logging server events.
+.sp
+.ne 3
+.B servername:
+.IR hostname [: port ]
+.PP
+The name of the server. If
+.I hostname 
+is empty, the fully qualified domain name is used instead. The port
+defaults to port 80.
+.sp
+.ne 3
+.B serveraddr:
+.I addr
+.PP
+This address is used for binding the server's socket. If not specified,
+connections can come from any interface.
+.sp
+.ne 3
+.BI serveruser:
+.I user
+.br
+.BI servergroup:
+.I group
+.PP
+Configures the user and group the servers swicthes to after binding
+the socket to the desired port. Examples are
+.B nobody
+or
+.BR wwwrun .
+.sp
+.ne 3
+.BI maxclients:
+.I num
+.PP
+This settings limits the maximum number of concurrent connections to
+.IR num .
+The default value is 10 connections.
+.sp
+.ne 3
+.B deltarpmpath:
+.I path
+.PP
+Sets the directory where drpmsync searches for the deltarpm programs.
+The default is to search the
+.B $PATH
+variable.
+
+.SH FILES
+.PD 0
+.IP \fIdir\fP/drpmsync/deltas
+directory used to store the deltas
+.IP \fIdir\fP/drpmsync/lock
+lock used to serialize syncrpm calls
+.IP \fIdir\fP/drpmsync/wip
+temporary storing space for the transmitted objects
+.IP \fIdir\fP/drpmsync/cache
+md5sum cache to speed up the calculation of the tree state
+.IP \fIdir\fP/drpmsync/timstamp
+contains the time of the last finished sync and the last time the
+remote tree state was requested.
+
+.SH SEE ALSO
+.BR makedeltarpm (8),
+.BR combinedeltarpm (8),
+.BR applydeltarpm (8),
+
+.SH AUTHOR
+Michael Schroeder <mls@suse.de>

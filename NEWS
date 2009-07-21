@@ -1,0 +1,9 @@
+
+ What's new in deltarpm-3.4
+----------------------------
+
+- added fragiso program
+- updated drpmsync code
+- fixed two bugs in the prelink code (thanks to Jonathan Dieter and
+  Ahmed Kamal)
+

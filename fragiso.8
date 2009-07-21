@@ -1,0 +1,55 @@
+.\" man page for fragiso
+.\" Copyright (c) 2007 Michael Schroeder <mls@suse.de>
+.\" See LICENSE.BSD for license
+.TH FRAGISO 8 "Mar 2007"
+.SH NAME
+fragiso \- split rpm packages from an iso and reassemble the iso later on
+
+.SH SYNOPSIS
+.B fragiso
+.B make
+.I iso
+.I fiso
+.br
+.B fragiso
+.B list
+.I fiso
+.br
+.B fragiso
+.B fill
+.RB [ -m ]
+.I fiso iso
+
+.SH DESCRIPTION
+fragiso can be used to convert an iso file into a fragment file, which
+is a list describing all of the rpms on the iso and a data chunk
+containing everything but the rpms. It is used by
+.B drpmsync
+when an iso needs to be transfered. The idea is that often the rpms
+on the iso are already available on the destination host, so it saves
+bandwith to first transfer the fragmented iso, copy the locally
+available rpms, transfer the unavailable rpms and reassemble the
+iso file.
+
+.B fragiso
+.B make
+converts the iso into the fragment iso,
+.B fragiso
+.B list
+can be used to extract the rpm information. This information consists
+of the offset and length of all rpms and the lead/signature header
+md5sum plus the header/payload md5sum. To reassemble the iso one
+has to copy the rpms at the right offset into a new file and then
+use
+.B fragiso
+.B fill
+later on to provide all data not contained in the rpms. The
+.B -m
+option tells fragiso to print the resulting md5sum of the iso to stdout.
+It can be used for verification purposes.
+
+.SH SEE ALSO
+.BR drpmsync (8)
+
+.SH AUTHOR
+Michael Schroeder <mls@suse.de>

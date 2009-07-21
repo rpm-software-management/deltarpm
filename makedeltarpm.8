@@ -1,0 +1,88 @@
+.\" man page for makedeltarpm
+.\" Copyright (c) 2005 Michael Schroeder <mls@suse.de>
+.\" See LICENSE.BSD for license
+.TH MAKEDELTARPM 8 "Feb 2005"
+.SH NAME
+makedeltarpm \- create a deltarpm from two rpms
+
+.SH SYNOPSIS
+.B makedeltarpm
+.RB [ -v ]
+.RB [ -V
+.IR version ]
+.RB [ -z
+.IR compression ]
+.RB [ -s
+.IR seqfile ]
+.RB [ -r ]
+.RB [ -u ]
+.I oldrpm
+.I newrpm
+.I deltarpm
+.br
+.B makedeltarpm
+.RB [ -v ]
+.RB [ -V
+.IR version ]
+.RB [ -z
+.IR compression ]
+.RB [ -s
+.IR seqfile ]
+.RB [ -u ]
+.B -p
+.I oldrpmprint
+.IR oldpatchrpm
+.I oldrpm
+.I newrpm
+.I deltarpm
+
+.SH DESCRIPTION
+makedeltarpm creates a deltarpm from two rpms. The deltarpm can
+later be used to recreate the new rpm from either filesystem data
+or the old rpm. Use the
+.B -v
+option to make makedeltarpm more verbose about its work (use it
+twice to make it even more verbose).
+.PP
+If you want to create a
+smaller and faster to combine "rpm-only" deltarpm which does not
+work with filesystem data, specify the
+.B -r
+option.
+.PP
+makedeltarpm normally produces
+a V3 format deltarpm, use the
+.B -V
+option to specify a different version if desired. The
+.B -z
+option can be used to specify a different compression method, the
+default is to use the same compression method as used in the
+new rpm.
+.PP
+The
+.B -s
+option makes makedeltarpm write out the sequence id to the specified
+file
+.IR seqfile .
+
+If you also use patch rpms you should use the
+.B -p
+option to specify the rpm-print of
+.I oldrpm
+and the created
+patch rpm. This option tells makedeltarpm to exclude the files that
+were not included in the patch rpm but are not byteswise identical
+to the ones in oldrpm.
+.PP
+makedeltarpm can also create an "identity" deltarpm by adding the
+.B -u
+switch. In this case only one rpm has to be specified. An identity
+deltarpm can be useful to just replace the signature header of a
+rpm or to reconstruct a rpm from the filesystem.
+
+.SH SEE ALSO
+.BR applydeltarpm (8)
+.BR combinedeltarpm (8)
+
+.SH AUTHOR
+Michael Schroeder <mls@suse.de>

@@ -1,0 +1,163 @@
+
+---------------------
+ deltarpm suite V3.4
+---------------------
+
+A) Programs
+
+    makedeltarpm [-V version] [-s seqfile] oldrpm newrpm deltarpm
+
+    Extracts the usable files (i.e. no config files) from oldrpm and
+    diffs them against newrpm.
+
+    Options:
+      -V: create a specific version, default is V3
+      -s: write sequence info into file (usefull for creating
+	  yast patchfiles)
+
+    applydeltarpm [-v] [-p] [-c] [-C] [-r oldrpm] deltarpm newrpm
+    applydeltarpm -i deltarpm
+    applydeltarpm [-c] -s seq
+
+    Reconstruct newrpm from the delta rpm. May run in filesystem mode
+    or in rpm mode.
+
+    Options:
+      -v: verbose mode, print statistics
+      -p: print percent completed (use -p -p for parsable output)
+      -c: just check if the rpm can be reconstructed
+      -C: fast check, don't verify md5 sums of the used files
+      -r: reconstruct from the specified rpm, not from filesystem
+          data
+      -s: check if rpm can be reconstructed based on sequence info
+
+   combinedeltarpm deltarpm1 deltarpm2... newdeltarpm
+
+   Combine multiple deltarpms to a new one
+
+B) License
+
+   delta.c is distributed under a 2-clause BSD license, see the
+   head of the file for details.
+   All other files are distributed under BSD license, see LICENSE.BSD.
+
+C) Thanks
+
+   Many thanks to Carl-Daniel Hailfinger who started the deltarpm
+   project with his ideas and discussions.
+   
+D) Size limitations and compilation options
+
+   Deltarpms are (as all rpms) limited to 2GB size. The rpm archive
+   is compressed, though, and thus can exceed this limit.
+   There are two compile options that allow deltarpms to deal
+   with rpms whose archive exceeds 4GB:
+
+   DELTARPM_64BIT
+     Allows applydeltarpm to deal with deltarpms that where created
+     for rpms that have an archive bigger that 4GB. Applying such
+     a deltarpm works on a 32bit architecture.
+
+   BSDIFF_SIZET
+     Changes the diff algorithm to use size_t instead of unsigned int.
+     This allows the creation of deltarpms for oversized rpms. You
+     need a 64bit architecture for this to work (and DELTARPM_64BIT
+     must also be defined).
+     Defining BSDIFF_SIZET changes the memory requirements needed
+     for creating the deltarpm. If your uncompressed archive size 
+     is N GB, you need about 3*N GB if BSDIFF_SIZET is not defined,
+     but 4*N GB if it is.
+
+E) delta.rpm file format
+
+
+standard deltarpms:
+
+   -----------------
+   96 bytes rpm lead
+   -----------------
+    x bytes rpm signature header 
+   -----------------
+    x bytes rpm header 
+            (the is an exact copy of the header of new.rpm, the
+             only difference is that the PAYLOADFORMAT is patched
+             to "drpm")
+   -----------------
+   -----------------
+[[   the rest of the deltarpm may be compressed, like a
+     normal rpm   ]]
+   -----------------
+   -----------------
+    4 bytes id: "DLT1" (V2: "DLT2", V3: "DLT3")
+   -----------------
+    4 bytes source nevr length
+    x bytes source nevr (name-epoch:version-release)
+   -----------------
+    4 bytes seqlength (always 16 if header included in diff)
+    x bytes sequence, containing
+            16 bytes seq md5sum
+            x bytes compressed seqence
+            (the sequence defines which files get included from the rpm
+             filelist in which order)
+               
+   -----------------
+   16 bytes fullmd5, md5sum of the complete rpm
+V2: 4 bytes fullsize, size of the complete rpm
+V2: 4 bytes compression type
+V2: 4 bytes compression parameter block len
+V2: x bytes compression parameter block
+
+   -----------------
+V3: target header len, zero if header not included in diff
+   -----------------
+V3: 4 bytes number of adjust elements (offadjn)
+V3: 2 * offadjn * 4 bytes adjust elements
+
+   -----------------
+    4 bytes leadlen
+    x bytes lead     (lead/signatures of the new rpm)
+   -----------------
+    4 bytes payloadformatoffset
+                     (used to change the format back to "cpio")
+   -----------------
+    4 bytes number of copies from internal data (inn)
+    4 bytes number of copies from external data (outn)
+    inn * 4 bytes number of external copies to do before internal copy
+    inn * 4 bytes length of internal copy
+    outn * 4 bytes offset adjustment of external copy
+    outn * 4 bytes length of external copy
+   -----------------
+V3: 4 bytes length of external data MSB
+    4 bytes length of external data
+   -----------------
+    4 bytes length of add data
+    x bytes add data, bzip2 or gzip compressed
+   -----------------
+V3: 4 bytes length of internal data MSB
+    4 bytes length of internal data
+    x bytes internal data
+
+
+rpm-only deltarpms:
+
+    4 bytes magic: "drpm"
+    4 bytes id: (V3: "DLT3")
+    4 bytes target nevr length
+    x bytes target nevr (name-epoch:version-release)
+    4 bytes length of add data
+    x bytes add data, bzip2 or gzip compressed
+   -----------------
+[[   rest of the deltarpm compressed, same format as a
+     standard deltarpm starting with the id, add data
+     has to be zero.
+     the sequence will always be 16 bytes, the md5 sum of
+     the header and the compressed payload (i.e. exactly
+     the md5sum rpm stores in the signature header).
+     the target-header len will be non-zero as the header
+     is included in the diff.  ]]
+
+"rpm-only no diff" deltarpms are like rpm-only deltarpms, but the target
+compression is "uncompressed" and there are no delta instructions,
+i.e. inn and outn are both zero.
+
+2005-06-14 mls
