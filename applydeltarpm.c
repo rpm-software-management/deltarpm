@@ -395,10 +395,7 @@ fillblock_prelink(struct blk *b, int id, struct seqdescr *sd, struct fileblock *
 	    {
 	      if (fd != -1)
 		{
-		  if (isp)
-		    prelinked_close(fd);
-		  else
-		    close(fd);
+		  close(fd);
 		  fd = -1;
 		}
 	      sd++;
@@ -487,10 +484,7 @@ fillblock_prelink(struct blk *b, int id, struct seqdescr *sd, struct fileblock *
 		{
 		  if (fd)
 		    {
-		      if (isp)
-			prelinked_close(fd);
-		      else
-			close(fd);
+		      close(fd);
 		      fd = -1;
 		    }
 		  l2 = l > sd->datalen - o ? sd->datalen - o : l;
@@ -984,7 +978,7 @@ checkprelinked(char *name, unsigned char *hmd5, unsigned int size)
       rpmMD5Update(&ctx, buf, l);
       size -= l;
     }
-  prelinked_close(fd);
+  close(fd);
   rpmMD5Final(md5, &ctx);
   if (memcmp(md5, hmd5, 16))
     {

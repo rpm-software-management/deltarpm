@@ -7,6 +7,7 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <fcntl.h>
 
 static inline int
 elf16(unsigned char *buf, int le)
@@ -122,9 +123,10 @@ int
 prelinked_open(char *name)
 {
   pid_t pid;
-  int status;
+  int fd, status;
   int p[2];
   struct stat stb;
+  char template[21];
 
   if (stat("/usr/sbin/prelink", &stb))
     {
@@ -132,49 +134,33 @@ prelinked_open(char *name)
       fprintf(stderr, "prelink not installed, cannot undo prelinking");
       exit(1);
     }
-  if (prelink_pid != (pid_t)-1)
+  strcpy(template, "/tmp/deltarpm.XXXXXX");
+  if ((fd = mkstemp(template)) == -1)
     {
-      waitpid(prelink_pid, &status, WNOHANG);
-      prelink_pid = (pid_t)-1;
-    }
-  if (pipe(p))
-    {
-      perror("pipe");
+      perror("mkstemp");
       exit(1);
     }
+  close(fd);    /* prelink renames another tmpfile over our file */
   pid = fork();
   if (pid == (pid_t)(-1))
     {
       perror("fork");
       exit(1);
     }
-  if (pid)
+  if (!pid)
     {
-      prelink_pid = pid;
-      close(p[1]);
-      return p[0];
+      execl("/usr/sbin/prelink", "prelink", "-o", template, "-u", name, (char *)0);
+      perror("/usr/sbin/prelink");
+      _exit(1);
     }
-  close(p[0]);
-  if (p[1] != 1)
+  while (waitpid(pid, &status, 0) == (pid_t)-1)
+    ;
+  if ((fd = open(template, O_RDONLY)) == -1)
     {
-      dup2(p[1], 1);
-      close(p[1]);
+      perror(template);
+      exit(1);
     }
-  execl("/usr/sbin/prelink", "prelink", "-y", name, (char *)0);
-  perror("/usr/sbin/prelink");
-  _exit(1);
+  unlink(template);
+  return fd; 
 }
 
-void
-prelinked_close(int fd)
-{
-  int status;
-
-  close(fd);
-  if (prelink_pid != (pid_t)-1)
-    {
-      kill(prelink_pid, SIGPIPE);
-      if (waitpid(prelink_pid, &status, 0) == prelink_pid)
-	prelink_pid = (pid_t)-1;
-    }
-}
