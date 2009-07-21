@@ -1929,7 +1929,7 @@ sub applydeltas {
     return ();
   }
   if ($job) {
-    $job->{'applydeltas'} = [$dn, @deltas];
+    $job->{'applydeltas'} = [$from, $dn, $to, @deltas];
     return ($job);
   }
   if ($config_keep_uncombined || @deltas <= 1) {
@@ -1947,10 +1947,15 @@ sub applydeltas {
 sub applydeltas_finish {
   my ($job) = @_;
   die("job not running\n") unless $job && $job->{'applydeltas'};
-  my ($dn, @deltas) = @{$job->{'applydeltas'}};
+  my ($from, $dn, $to, @deltas) = @{$job->{'applydeltas'}};
   delete $job->{'applydeltas'};
   my $err;
   (undef, $err) = runprg_finish($job);
+  if ($err) {
+    recvlog_print("! applydeltarpm -r $from $dn $to failed: $err");
+    unlink(@deltas);
+    return ();
+  }
   if ($config_keep_uncombined || @deltas <= 1) {
     if (@deltas > 1) {
       unlink($dn) || die("unlink $dn: $!\n");
@@ -2803,7 +2808,7 @@ use_filelist_data:
       die("bad name.arch in file list: $l[5]\n") if $l[5] eq '.' || $l[5] eq '..' || $l[5] =~ /\//;
       push @syncfiles, \@l;
     } else {
-      die("bad line for $name\n");
+      die("bad line for $name: $hex\n");
     }
   }
   # validate that no entry is listed twice
