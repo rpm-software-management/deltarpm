@@ -28,6 +28,7 @@
 #define TAG_PAYLOADFORMAT 1124
 #define TAG_PAYLOADCOMPRESSOR 1125
 #define TAG_PAYLOADFLAGS 1126
+#define TAG_FILECOLORS  1140
 
 #define SIGTAG_SIZE     1000
 #define SIGTAG_MD5      1004
@@ -42,6 +43,9 @@
 
 #define VERIFY_MD5      (1 << 0)
 #define VERIFY_FILESIZE (1 << 1)
+
+#define RPMFC_ELF32     (1 << 0)
+#define RPMFC_ELF64     (1 << 1)
 
 #define devmajor(rdev) (((rdev) >> 8) & 0xfff)
 #define devminor(rdev) (((rdev) & 0xff) | (((rdev) >> 12) & 0xfff00))

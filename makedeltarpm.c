@@ -416,6 +416,18 @@ write_seqfile(struct deltarpm *d, char *seqfile)
     }
 }
 
+static int 
+in_multilib_dir(char *fn)
+{
+  char *dirs[] = { "lib/", "lib64/", "lib32/", NULL };
+  int i;
+
+  for (i = 0; dirs[i] != NULL; i++)
+    if (strstr(fn, dirs[i]) != NULL)
+      return 1;
+  return 0;
+}
+
 int
 main(int argc, char **argv)
 {
@@ -425,7 +437,7 @@ main(int argc, char **argv)
   char *nevr;
   int filecnt;
   char **filenames, **filemd5s, **filelinktos;
-  unsigned int *fileflags, *filemodes, *filerdevs, *filesizes, *fileverify;
+  unsigned int *fileflags, *filemodes, *filerdevs, *filesizes, *fileverify, *filecolors;
   int i, fd, l, l2, l3;
   struct cfile *bfd;
   struct cpiophys cph;
@@ -442,6 +454,7 @@ main(int argc, char **argv)
   int skipped_badsize = 0;
   int skipped_fileflags = 0;
   int skipped_verifyflags = 0;
+  int skipped_multilib = 0;
   int skipped_all = 0;
   int pinfo = 0;
   struct rpmlfile *files1 = 0;
@@ -741,6 +754,7 @@ main(int argc, char **argv)
   filemodes = headint16(h, TAG_FILEMODES, (int *)0);
   fileverify = headint32(h, TAG_FILEVERIFY, (int *)0);
   filelinktos = headstringarray(h, TAG_FILELINKTOS, (int *)0);
+  filecolors = headint32(h, TAG_FILECOLORS, (int *)0);
 
   if (alone)
     {
@@ -903,6 +917,12 @@ main(int argc, char **argv)
 		    fprintf(vfp, "skipping %s: bad verify flags %x\n", np, fileverify[i]);
 		  skipped_verifyflags++;
 		}
+	      else if (filecolors && (filecolors[i] & (RPMFC_ELF32 | RPMFC_ELF64)) != 0 && !in_multilib_dir(np))
+		{
+		  if (verbose > 1)
+		    fprintf(vfp, "skipping %s: colored file in non-multilib dir\n", np);
+		  skipped_multilib++;
+		}
 	      else
 		{
 		  if (verbose > 1)
@@ -1059,6 +1079,8 @@ oaretry1:
 	    fprintf(vfp, "  file flags:   %4d/%d = %.1f%%\n", skipped_fileflags, skipped_all, skipped_fileflags * 100. / skipped_all);
 	  if (skipped_verifyflags)
 	    fprintf(vfp, "  verify flags: %4d/%d = %.1f%%\n", skipped_verifyflags, skipped_all, skipped_verifyflags * 100. / skipped_all);
+	  if (skipped_multilib)
+	    fprintf(vfp, "  colored-not-in-multidir: %4d/%d = %.1f%%\n", skipped_multilib, skipped_all, skipped_multilib * 100. / skipped_all);
 	}
       addtoseq(-1);
       if (verbose > 1)
@@ -1083,6 +1105,7 @@ oaretry1:
   fileverify = xfree(fileverify);
   filelinktos = xfree(filelinktos);
   filenames = xfree(filenames);
+  filecolors = xfree(filecolors);
   if (!alone)
     h = xfree(h);
 

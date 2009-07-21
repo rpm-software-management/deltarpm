@@ -3,7 +3,7 @@ bindir=$(prefix)/bin
 mandir=$(prefix)/man
 rpmdumpheader=$(bindir)/rpmdumpheader
 zlibdir=zlib-1.2.2.f-rsyncable
-CFLAGS = -O2 -Wall
+CFLAGS = -O2 -Wall -g
 CPPFLAGS = -DDELTARPM_64BIT -DBSDIFF_NO_SUF -DRPMDUMPHEADER=\"$(rpmdumpheader)\" -I$(zlibdir)
 LDLIBS = -lbz2 $(zlibdir)/libz.a -llzma
 LDFLAGS =
