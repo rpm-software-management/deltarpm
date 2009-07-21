@@ -23,7 +23,14 @@ int main(int argc, char **argv)
   char *e;
   char *v;
   char *r;
+  char *a = NULL;
 
+  if (argc > 2 && !strcmp(argv[1], "-a"))
+    {
+      a = argv[2];
+      argc -= 2;
+      argv += 2;
+    }
   if (argc != 2)
     {
       fprintf(stderr, "usage: rpmdumpheader package\n");
@@ -62,6 +69,9 @@ int main(int argc, char **argv)
   rpmdbSetIteratorRE(mi, RPMTAG_EPOCH, RPMMIRE_STRCMP, e);
   rpmdbSetIteratorRE(mi, RPMTAG_VERSION, RPMMIRE_STRCMP, v);
   rpmdbSetIteratorRE(mi, RPMTAG_RELEASE, RPMMIRE_STRCMP, r);
+  if (a)
+    rpmdbSetIteratorRE(mi, RPMTAG_ARCH, RPMMIRE_STRCMP, a);
+
   if ((h = rpmdbNextIterator(mi)) != NULL)
     {
       fdo = Fopen("-", "w.ufdio");
@@ -70,9 +80,9 @@ int main(int argc, char **argv)
   else
     {
       if (e)
-	fprintf(stderr, "%s-%s:%s-%s is not installed\n", n, e, v, r);
+	fprintf(stderr, "%s-%s:%s-%s%s%s is not installed\n", n, e, v, r, a ? "." : "", a ? a : "");
       else
-	fprintf(stderr, "%s-%s-%s is not installed\n", n, v, r);
+	fprintf(stderr, "%s-%s-%s%s%s is not installed\n", n, v, r, a ? "." : "", a ? a : "");
       ret = 1;
     }
   mi = rpmdbFreeIterator(mi);

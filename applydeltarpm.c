@@ -1116,8 +1116,9 @@ main(int argc, char **argv)
   int seqmatches = 1;
   FILE *vfp;
   struct deltarpm d;
+  char *arch = 0;
 
-  while ((c = getopt(argc, argv, "cCisvpr:")) != -1)
+  while ((c = getopt(argc, argv, "cCisvpr:a:")) != -1)
     {
       switch(c)
 	{
@@ -1144,6 +1145,9 @@ main(int argc, char **argv)
 	case 'C':
 	  checkflags = SEQCHECK_SIZE;
 	  check = 1;
+	  break;
+	case 'a':
+	  arch = optarg;
 	  break;
 	default:
 	  fprintf(stderr, "usage: applydeltarpm [-r <rpm>] deltarpm rpm\n");
@@ -1331,7 +1335,10 @@ main(int argc, char **argv)
 	      dup2(pi[1], 1);
 	      close(pi[1]);
 	    }
-	  execlp(RPMDUMPHEADER, RPMDUMPHEADER, d.nevr, (char *)0);
+	  if (arch)
+	    execlp(RPMDUMPHEADER, RPMDUMPHEADER, "-a", arch, d.nevr, (char *)0);
+	  else
+	    execlp(RPMDUMPHEADER, RPMDUMPHEADER, d.nevr, (char *)0);
 	  perror(RPMDUMPHEADER);
 	  _exit(1);
 	}
