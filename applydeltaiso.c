@@ -267,7 +267,7 @@ applydelta(FILE *fpold, struct cfile *ocf, struct cfile *cf, unsigned char *outd
 	}
       out[2 * i] = off;
       off += out[2 * i + 1];
-      if (off < 1 || off > outlen) 
+      if (off < 1 || off > outlen)
 	{
 	  fprintf(stderr, "corrupt delta instructions (outdata off + len %d > %d)\n", off, outlen);
 	  exit(1);
@@ -457,7 +457,7 @@ int main(int argc, char **argv)
       fprintf(stderr, "md5sum mismatch, iso is corrupt\n");
       exit(1);
     }
-  printf("iso sucessfully re-created, md5sum: ");
+  printf("iso successfully re-created, md5sum: ");
   for (i = 0; i < 16; i++)
      printf("%02x", md5res[i]);
   printf("\n");
