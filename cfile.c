@@ -658,7 +658,7 @@ cropen_lz(struct cfile *f)
 {
   lzma_stream tmp = LZMA_STREAM_INIT;
   f->strm.lz = tmp;
-  if (lzma_auto_decoder(&f->strm.lz, 1 << 24, 0) != LZMA_OK)
+  if (lzma_auto_decoder(&f->strm.lz, 1 << 25, 0) != LZMA_OK)
     {
       free(f);
       return 0;
@@ -1101,6 +1101,8 @@ cfile_open(int mode, int fd, void *fp, int comp, size_t len, void (*ctxup)(void 
 	  else if (f->buf[0] == 255 && f->buf[1] == 'L' && f->buf[2] == 'Z')
 	    comp = CFILE_COMP_LZMA;
 	  else if (f->buf[0] == 0135 && f->buf[1] == 0 && f->buf[2] == 0)
+	    comp = CFILE_COMP_LZMA;
+	  else if (f->buf[0] == 0xfd && f->buf[1] == '7' && f->buf[2] == 'z' && f->buf[3] == 'X' && f->buf[4] == 'Z')
 	    comp = CFILE_COMP_LZMA;
 	}
     }
