@@ -656,8 +656,9 @@ crunread_gz(struct cfile *f, void *buf, int len)
 static struct cfile *
 cropen_lz(struct cfile *f)
 {
-  f->strm.lz = LZMA_STREAM_INIT_VAR;
-  if (lzma_auto_decoder(&f->strm.lz, 0, 0) != LZMA_OK)
+  lzma_stream tmp = LZMA_STREAM_INIT;
+  f->strm.lz = tmp;
+  if (lzma_auto_decoder(&f->strm.lz, 1 << 24, 0) != LZMA_OK)
     {
       free(f);
       return 0;
@@ -726,14 +727,13 @@ crclose_lz(struct cfile *f)
 static struct cfile *
 cwopen_lz(struct cfile *f)
 {
-  lzma_options_alone alone;
+  lzma_options_lzma alone;
+  lzma_stream tmp = LZMA_STREAM_INIT;
 
   if (!f->level)
     f->level = 3;
-  lzma_init_encoder();
-  f->strm.lz = LZMA_STREAM_INIT_VAR;
-  alone.uncompressed_size = LZMA_VLI_VALUE_UNKNOWN;
-  memcpy(&alone.lzma, &lzma_preset_lzma[f->level - 1], sizeof(alone.lzma));
+  f->strm.lz = tmp;
+  lzma_lzma_preset(&alone, f->level - 1);
   if (lzma_alone_encoder(&f->strm.lz, &alone) != LZMA_OK)
     {
       free(f);
@@ -1193,7 +1193,7 @@ cfile_comp2str(int comp)
       return buf;
     }
   switch (comp)
-    {    
+    {
     case CFILE_COMP_UN:
       return "uncomp.";
     case CFILE_COMP_GZ:
@@ -1204,7 +1204,7 @@ cfile_comp2str(int comp)
       return "bzip";
     case CFILE_COMP_LZMA:
       return "lzma";
-    }    
+    }
   return "???";
 }
 
