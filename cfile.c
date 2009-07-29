@@ -742,6 +742,23 @@ cwopen_lz(struct cfile *f)
   return f;
 }
 
+static struct cfile *
+cwopen_xz(struct cfile *f)
+{
+  lzma_stream tmp = LZMA_STREAM_INIT;
+
+  /*if (!f->level)
+    f->level = 3;*/
+  f->level = 6; /* Ugly hack to temporarily force level */
+  f->strm.lz = tmp;
+  if (lzma_easy_encoder(&f->strm.lz, f->level, LZMA_CHECK_CRC32) != LZMA_OK)
+    {
+      free(f);
+      return 0;
+    }
+  return f;
+}
+
 static int
 cwclose_lz(struct cfile *f)
 {
@@ -1103,7 +1120,7 @@ cfile_open(int mode, int fd, void *fp, int comp, size_t len, void (*ctxup)(void 
 	  else if (f->buf[0] == 0135 && f->buf[1] == 0 && f->buf[2] == 0)
 	    comp = CFILE_COMP_LZMA;
 	  else if (f->buf[0] == 0xfd && f->buf[1] == '7' && f->buf[2] == 'z' && f->buf[3] == 'X' && f->buf[4] == 'Z')
-	    comp = CFILE_COMP_LZMA;
+	    comp = CFILE_COMP_XZ;
 	}
     }
   f->comp = CFILE_COMPALGO(comp);
@@ -1143,6 +1160,14 @@ cfile_open(int mode, int fd, void *fp, int comp, size_t len, void (*ctxup)(void 
       f->write  = mode == CFILE_OPEN_WR ? cwwrite_lz : 0;
       f->close  = mode == CFILE_OPEN_RD ? crclose_lz : cwclose_lz;
       return mode == CFILE_OPEN_RD ? cropen_lz(f) : cwopen_lz(f);
+    case CFILE_COMP_XZ:
+      f->strm.lz.allocator = 0;
+      f->strm.lz.internal = 0;
+      f->read   = mode == CFILE_OPEN_RD ? crread_lz : 0;
+      f->unread = mode == CFILE_OPEN_RD ? crunread_lz : 0;
+      f->write  = mode == CFILE_OPEN_WR ? cwwrite_lz : 0;
+      f->close  = mode == CFILE_OPEN_RD ? crclose_lz : cwclose_lz;
+      return mode == CFILE_OPEN_RD ? cropen_lz(f) : cwopen_xz(f);
     default:
       free(f);
       return 0;

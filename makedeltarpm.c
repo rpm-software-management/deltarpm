@@ -350,6 +350,8 @@ str2comp(char *comp)
 #endif
   if (!strcmp(comp, "lzma"))
     return CFILE_COMP_LZMA;
+  if (!strcmp(comp, "xz"))
+    return CFILE_COMP_XZ;
   if (!strcmp(comp, "uncompressed"))
     return CFILE_COMP_UN;
   fprintf(stderr, "unknown compression type: %s\n", comp);
@@ -416,7 +418,7 @@ write_seqfile(struct deltarpm *d, char *seqfile)
     }
 }
 
-static int 
+static int
 in_multilib_dir(char *fn)
 {
   char *dirs[] = { "lib/", "lib64/", "lib32/", NULL };

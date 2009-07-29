@@ -51,6 +51,7 @@ typedef void (*cfile_ctxup)(void *, unsigned char *, unsigned int);
 #define CFILE_COMP_GZ_RSYNC (3)
 #define CFILE_COMP_BZ_17 (4)
 #define CFILE_COMP_LZMA (5)
+#define CFILE_COMP_XZ (6)
 
 #define CFILE_COMP_BZ CFILE_COMP_BZ_20
 

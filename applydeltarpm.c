@@ -1293,6 +1293,8 @@ main(int argc, char **argv)
     addblkcomp = CFILE_COMP_GZ;
   else if (d.addblklen > 3 && (d.addblk[0] == 255 && d.addblk[1] == 'L' && d.addblk[2] == 'Z'))
     addblkcomp = CFILE_COMP_LZMA;
+  else if (d.addblklen > 6 && (d.addblk[0] == 0xfd && d.addblk[1] == '7' && d.addblk[2] == 'z' && d.addblk[3] == 'X' && d.addblk[4] == 'Z'))
+    addblkcomp = CFILE_COMP_XZ;
   if (info)
     {
       unsigned int *size;
@@ -1348,7 +1350,7 @@ main(int argc, char **argv)
       fprintf(stderr, "deltarpm contains unknown compression parameters\n");
       exit(1);
     }
-  
+
   if (!fromrpm)
     {
       pid_t pid;
