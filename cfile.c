@@ -747,11 +747,11 @@ cwopen_xz(struct cfile *f)
 {
   lzma_stream tmp = LZMA_STREAM_INIT;
 
-  /*if (!f->level)
-    f->level = 3;*/
-  f->level = 6; /* Ugly hack to temporarily force level */
+  if (!f->level)
+    f->level = 3;
+
   f->strm.lz = tmp;
-  if (lzma_easy_encoder(&f->strm.lz, f->level, LZMA_CHECK_CRC32) != LZMA_OK)
+  if (lzma_easy_encoder(&f->strm.lz, f->level, LZMA_CHECK_SHA256) != LZMA_OK)
     {
       free(f);
       return 0;
