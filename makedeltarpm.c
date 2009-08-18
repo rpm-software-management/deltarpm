@@ -223,13 +223,13 @@ void
 addtocpio(unsigned char **cpiop, bsuint *cpiol, unsigned char *d, int l)
 {
   bsuint cpl = *cpiol;
-  if (cpl + l < cpl || cpl + l + 4095 < cpl + l)
+  if (cpl + l < cpl || cpl + l + 65535 < cpl + l)
     {
       fprintf(stderr, "cpio archive to big\n");
       exit(1);
     }
-  if ((cpl & ~4095) == 0 || (cpl & ~4095) + l > 4096)
-    *cpiop = xrealloc(*cpiop, (cpl + l + 4095) & ~4095);
+  if (cpl == 0 || ((cpl - 1) & 65535) + l >= 65536)
+    *cpiop = xrealloc(*cpiop, (cpl + l + 65535) & ~65535);
   memcpy(*cpiop + cpl, d, l);
   *cpiol = cpl + l;
 }

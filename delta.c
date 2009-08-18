@@ -434,9 +434,9 @@ gotit:
 	}
       if (len - oldscore >= 32)
 	break;
-      if (len == oldscore)
-	scan += len;
-      else
+      if (len > HSIZE * 3 + 32)
+        scan += len - (HSIZE * 3 + 32);
+      if (scan <= lscan)
 	scan = lscan + 1;
       scanstart = scan;
       if (scan + HSIZE < newlen)
