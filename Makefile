@@ -1,14 +1,18 @@
 prefix=/usr/local
 bindir=$(prefix)/bin
+libdir=$(prefix)/lib
 mandir=$(prefix)/man
 rpmdumpheader=$(bindir)/rpmdumpheader
 zlibdir=zlib-1.2.2.f-rsyncable
 CFLAGS = -O2 -Wall -g
-CPPFLAGS = -DDELTARPM_64BIT -DBSDIFF_NO_SUF -DRPMDUMPHEADER=\"$(rpmdumpheader)\" -I$(zlibdir)
+CPPFLAGS = -fPIC -DDELTARPM_64BIT -DBSDIFF_NO_SUF -DRPMDUMPHEADER=\"$(rpmdumpheader)\" -I$(zlibdir)
 LDLIBS = -lbz2 $(zlibdir)/libz.a -llzma
 LDFLAGS =
+PYTHONVERS = $(shell ls /usr/include/python*/Python.h | sed "s|/usr/include/||g"| sed "s|/Python.h||g")
 
 all: makedeltarpm applydeltarpm rpmdumpheader makedeltaiso applydeltaiso combinedeltarpm fragiso
+
+python: _deltarpmmodule.so
 
 makedeltarpm: makedeltarpm.o writedeltarpm.o md5.o util.o rpml.o rpmhead.o cpio.o delta.o cfile.o $(zlibdir)/libz.a
 
@@ -24,6 +28,15 @@ makedeltaiso: makedeltaiso.o delta.o rpmoffs.o rpmhead.o util.o md5.o cfile.o $(
 applydeltaiso: applydeltaiso.o util.o md5.o cfile.o $(zlibdir)/libz.a
 
 fragiso: fragiso.o util.o md5.o rpmhead.o cfile.o $(zlibdir)/libz.a
+
+_deltarpmmodule.so: readdeltarpm.o rpmhead.o util.o md5.o cfile.o
+	for ver in $(PYTHONVERS) ; do \
+		if [ ! -f "$$ver/$@" ]; then \
+			mkdir -p $$ver ;\
+			$(CC) $(CFLAGS) -I/usr/include/$$ver -fPIC -c -o $$ver/deltarpmmodule.o deltarpmmodule.c ;\
+			$(CC) -o $$ver/$@ $$ver/deltarpmmodule.o $^ -shared -Wl,-soname,_deltarpmmodule.so -lz -llzma -lbz2; \
+		fi; \
+	done
 
 $(zlibdir)/libz.a:
 	cd $(zlibdir) ; make CFLAGS="$(CFLAGS)" libz.a
@@ -50,6 +63,13 @@ install:
 	install -m 644 makedeltaiso.8 $(DESTDIR)$(mandir)/man8
 	install -m 644 applydeltaiso.8 $(DESTDIR)$(mandir)/man8
 	install -m 644 drpmsync.8 $(DESTDIR)$(mandir)/man8
+	for ver in $(PYTHONVERS) ; do \
+		if [ -e $$ver/_deltarpmmodule.so ]; then \
+			mkdir -p $(DESTDIR)$(libdir)/$$ver/site-packages ; \
+			install -m 755 $$ver/_deltarpmmodule.so $(DESTDIR)$(libdir)/$$ver/site-packages ;\
+			install -m 644 deltarpm.py $(DESTDIR)$(libdir)/$$ver/site-packages ;\
+		fi; \
+	done
 
 .PHONY: clean install
 
@@ -71,3 +91,4 @@ rpmoffs.o: rpmoffs.c rpmoffs.h
 readdeltarpm.o: readdeltarpm.c deltarpm.h util.h md5.h rpmhead.h cfile.h
 writedeltarpm.o: readdeltarpm.c deltarpm.h md5.h rpmhead.h cfile.h
 fragiso.o: fragiso.c util.h md5.h rpmhead.h cfile.h
+deltarpmmodule.o: deltarpmmodule.c
