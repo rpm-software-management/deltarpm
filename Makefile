@@ -4,7 +4,7 @@ libdir=$(prefix)/lib
 mandir=$(prefix)/man
 rpmdumpheader=$(bindir)/rpmdumpheader
 zlibdir=zlib-1.2.2.f-rsyncable
-CFLAGS = -O2 -Wall -g
+CFLAGS = -fPIC -O2 -Wall -g
 CPPFLAGS = -fPIC -DDELTARPM_64BIT -DBSDIFF_NO_SUF -DRPMDUMPHEADER=\"$(rpmdumpheader)\" -I$(zlibdir)
 LDLIBS = -lbz2 $(zlibdir)/libz.a -llzma
 LDFLAGS =
@@ -29,17 +29,17 @@ applydeltaiso: applydeltaiso.o util.o md5.o cfile.o $(zlibdir)/libz.a
 
 fragiso: fragiso.o util.o md5.o rpmhead.o cfile.o $(zlibdir)/libz.a
 
-_deltarpmmodule.so: readdeltarpm.o rpmhead.o util.o md5.o cfile.o
+_deltarpmmodule.so: readdeltarpm.o rpmhead.o util.o md5.o cfile.o $(zlibdir)/libz.a
 	for ver in $(PYTHONVERS) ; do \
 		if [ ! -f "$$ver/$@" ]; then \
 			mkdir -p $$ver ;\
-			$(CC) $(CFLAGS) -I/usr/include/$$ver -fPIC -c -o $$ver/deltarpmmodule.o deltarpmmodule.c ;\
-			$(CC) -o $$ver/$@ $$ver/deltarpmmodule.o $^ -shared -Wl,-soname,_deltarpmmodule.so -lz -llzma -lbz2; \
+			$(CC) $(CFLAGS) -I/usr/include/$$ver -I$(zlibdir) -fPIC -c -o $$ver/deltarpmmodule.o deltarpmmodule.c ;\
+			$(CC) -o $$ver/$@ $$ver/deltarpmmodule.o $^ -shared -Wl,-soname,_deltarpmmodule.so $(zlibdir)/libz.a -llzma -lbz2; \
 		fi; \
 	done
 
 $(zlibdir)/libz.a:
-	cd $(zlibdir) ; make CFLAGS="$(CFLAGS)" libz.a
+	cd $(zlibdir) ; make CFLAGS="-fPIC $(CFLAGS)" libz.a
 
 clean:
 	rm -f *.o
