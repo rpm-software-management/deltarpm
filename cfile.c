@@ -731,9 +731,9 @@ cwopen_lz(struct cfile *f)
   lzma_stream tmp = LZMA_STREAM_INIT;
 
   if (!f->level)
-    f->level = 3;
+    f->level = 2;
   f->strm.lz = tmp;
-  lzma_lzma_preset(&alone, f->level - 1);
+  lzma_lzma_preset(&alone, f->level);
   if (lzma_alone_encoder(&f->strm.lz, &alone) != LZMA_OK)
     {
       free(f);
