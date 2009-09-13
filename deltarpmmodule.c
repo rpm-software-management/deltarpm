@@ -66,13 +66,17 @@ static PyObject *doRead(PyObject *s, PyObject *args)
   int pid;
   int ipcpipe[2];
   
-  if (!PyArg_ParseTuple(args, "s", &filename))
+  if (!PyArg_ParseTuple(args, "s", &filename)) {
+    PyErr_SetFromErrno(PyExc_SystemError);
     return NULL;
+  }
 
   /* The delta rpm code does not expect to be used in its way. Its error handling
    * conststs of 'printf' and 'exit'. So, dirty hacks abound. */
-  if (pipe2(ipcpipe, O_NONBLOCK) == -1)
+  if (pipe(ipcpipe) == -1) {
+    PyErr_SetFromErrno(PyExc_SystemError);
     return NULL;
+  }
 
   if ((pid = fork())) {
     FILE *readend = fdopen(ipcpipe[0], "r");
@@ -90,8 +94,10 @@ static PyObject *doRead(PyObject *s, PyObject *args)
 
     readdeltarpm(filename, &d, NULL);
     PyMarshal_WriteObjectToFile(createDict(d), writend, Py_MARSHAL_VERSION);
-    exit(0);
+    fclose(writend);
+    _exit(0);
   }
+  close(ipcpipe[1]);
   return ret;
 }
 
