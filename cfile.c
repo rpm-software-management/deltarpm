@@ -1231,6 +1231,8 @@ cfile_comp2str(int comp)
       return "bzip";
     case CFILE_COMP_LZMA:
       return "lzma";
+    case CFILE_COMP_XZ:
+      return "xz";
     }
   return "???";
 }
