@@ -21,7 +21,7 @@ applydeltarpm: applydeltarpm.o readdeltarpm.o md5.o sha256.o util.o rpmhead.o cp
 combinedeltarpm: combinedeltarpm.o md5.o util.o rpmhead.o cfile.o readdeltarpm.o writedeltarpm.o $(zlibdir)/libz.a
 
 rpmdumpheader: rpmdumpheader.o
-	$(CC) $(LDFLAGS) $^ -lrpm -o $@
+	$(CC) $(LDFLAGS) $^ -lrpm -lrpmio -o $@
 
 makedeltaiso: makedeltaiso.o delta.o rpmoffs.o rpmhead.o util.o md5.o cfile.o $(zlibdir)/libz.a
 
