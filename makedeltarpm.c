@@ -442,7 +442,8 @@ main(int argc, char **argv)
   unsigned int *fileflags, *filemodes, *filerdevs, *filesizes, *fileverify, *filecolors;
   int digestalgo = 1;
   unsigned int *digestalgoarray;
-  int i, fd, l, l2, l3;
+  int i, l, l2, l3;
+  int fd, nfd;
   struct cfile *bfd;
   struct cpiophys cph;
   char *namebuf;
@@ -631,6 +632,8 @@ main(int argc, char **argv)
 
   rpmMD5Init(&seqmd5);
 
+  /* open old rpm */
+  /* (if alone == 1,  oldrpm == newrpm) */
   rpmname = argv[argc - 3 + alone];
   if (!strcmp(rpmname, "-"))
     fd = 0;
@@ -665,6 +668,7 @@ main(int argc, char **argv)
 
   if (alone && rpmonly)
     {
+      /* this mode just updates the lead and signatures, no need to do a real diff */
       if (verbose)
 	fprintf(vfp, "reading rpm header...\n");
       rpmMD5Init(&fullmd5);
@@ -735,8 +739,10 @@ main(int argc, char **argv)
       seq = xfree(seq);
       exit(0);
     }
+
   if (!alone)
     sigh = xfree(sigh);
+
   if (pinfo)
     {
       if (strcmp(nevr, nevr1) != 0)
@@ -771,55 +777,101 @@ main(int argc, char **argv)
       exit(1);
     }
 
+/***************************************************************************/
+
   if (alone)
     {
-      d.h = h;
       if (verbose)
 	fprintf(vfp, "reading rpm...\n");
-      rpmMD5Init(&fullmd5);
-      rpmMD5Update(&fullmd5, rpmlead, 96);
-      rpmMD5Update(&fullmd5, sigh->intro, 16);
-      rpmMD5Update(&fullmd5, sigh->data, sigh->cnt * 16 + sigh->dcnt);
-      rpmMD5Update(&fullmd5, d.h->intro, 16);
-      rpmMD5Update(&fullmd5, d.h->data, d.h->cnt * 16 + d.h->dcnt);
-      fullsize = 96 + 16 + sigh->cnt * 16 + sigh->dcnt + 16 + d.h->cnt * 16 + d.h->dcnt;
-      newbz = cfile_open(CFILE_OPEN_RD, fd, 0, CFILE_COMP_XX, CFILE_LEN_UNLIMITED, (cfile_ctxup)rpmMD5Update, &fullmd5);
-      if (!newbz)
-	{
-	  fprintf(stderr, "payload open failed\n");
-	  exit(1);
-	}
-      if (cfile_detect_rsync(newbz))
-	{
-	  fprintf(stderr, "detect_rsync failed\n");
-	  exit(1);
-	}
-      targetcomp = newbz->comp;
-      if ((payloadflags = headstring(d.h, TAG_PAYLOADFLAGS)) != 0)
-	if (*payloadflags >= '1' && *payloadflags <= '9')
-	  targetcomp = cfile_setlevel(targetcomp, *payloadflags - '0');
-      if (paycomp == CFILE_COMP_XX)
-	paycomp = targetcomp;
-      if (addblkcomp == CFILE_COMP_XX)
-	addblkcomp = targetcomp;
-      while ((l = newbz->read(newbz, buf, sizeof(buf))) > 0)
-	addtocpio(&newcpio, &newcpiolen, (unsigned char *)buf, l);
-      if (l < 0)
-	{
-	  fprintf(stderr, "payload read failed\n");
-	  exit(1);
-	}
-      fullsize += newbz->bytes;
-      if (newbz->close(newbz))
-	{
-	  fprintf(stderr, "junk at end of payload\n");
-	  exit(1);
-	}
-      if (strcmp(rpmname, "-") != 0)
-	close(fd);
+      nfd = fd;
       fd = -1;
-      rpmMD5Final(fullmd5res, &fullmd5);
+      d.h = h;
+      h = 0;
     }
+  else
+    {
+      if (verbose)
+	fprintf(vfp, "reading new rpm...\n");
+      rpmname = argv[argc - 2];
+      if (!strcmp(rpmname, "-"))
+	nfd = 0;
+      else if ((nfd = open(rpmname, O_RDONLY)) < 0)
+	{
+	  perror(rpmname);
+	  exit(1);
+	}
+      if (read(nfd, rpmlead, 96) != 96 || rpmlead[0] != 0xed || rpmlead[1] != 0xab || rpmlead[2] != 0xee || rpmlead[3] != 0xdb)
+	{
+	  fprintf(stderr, "%s: not a rpm\n", rpmname);
+	  exit(1);
+	}
+      if (rpmlead[4] != 0x03 || rpmlead[0x4e] != 0 || rpmlead[0x4f] != 5)
+	{
+	  fprintf(stderr, "%s: not a v3 rpm or not new header styles\n", rpmname);
+	  exit(1);
+	}
+      sigh = readhead(nfd, 1);
+      if (!sigh)
+	{
+	  fprintf(stderr, "could not read signature header\n");
+	  exit(1);
+	}
+      d.h = readhead(nfd, 0);
+      if (!d.h)
+	{
+	  fprintf(stderr, "could not read header\n");
+	  exit(1);
+	}
+    }
+  rpmMD5Init(&fullmd5);
+  rpmMD5Update(&fullmd5, rpmlead, 96);
+  rpmMD5Update(&fullmd5, sigh->intro, 16);
+  rpmMD5Update(&fullmd5, sigh->data, sigh->cnt * 16 + sigh->dcnt);
+  rpmMD5Update(&fullmd5, d.h->intro, 16);
+  rpmMD5Update(&fullmd5, d.h->data, d.h->cnt * 16 + d.h->dcnt);
+  if (rpmonly)
+    {
+      /* add new header to cpio */
+      addtocpio(&newcpio, &newcpiolen, d.h->intro, 16);
+      addtocpio(&newcpio, &newcpiolen, d.h->data, 16 * d.h->cnt + d.h->dcnt);
+    }
+  newbz = cfile_open(CFILE_OPEN_RD, nfd, 0, CFILE_COMP_XX, CFILE_LEN_UNLIMITED, (cfile_ctxup)rpmMD5Update, &fullmd5);
+  if (!newbz)
+    {
+      fprintf(stderr, "payload open failed\n");
+      exit(1);
+    }
+  if (cfile_detect_rsync(newbz))
+    {
+      fprintf(stderr, "detect_rsync failed\n");
+      exit(1);
+    }
+  targetcomp = newbz->comp;
+  if ((payloadflags = headstring(d.h, TAG_PAYLOADFLAGS)) != 0)
+    if (*payloadflags >= '1' && *payloadflags <= '9')
+      targetcomp = cfile_setlevel(targetcomp, *payloadflags - '0');
+  if (paycomp == CFILE_COMP_XX)
+    paycomp = targetcomp;
+  if (addblkcomp == CFILE_COMP_XX)
+    addblkcomp = targetcomp;
+  while ((l = newbz->read(newbz, buf, sizeof(buf))) > 0)
+    addtocpio(&newcpio, &newcpiolen, (unsigned char *)buf, l);
+  if (l < 0)
+    {
+      fprintf(stderr, "payload read failed\n");
+      exit(1);
+    }
+  fullsize += newbz->bytes;
+  if (newbz->close(newbz))
+    {
+      fprintf(stderr, "junk at end of payload\n");
+      exit(1);
+    }
+  if (strcmp(rpmname, "-") != 0)
+    close(nfd);
+  rpmMD5Final(fullmd5res, &fullmd5);
+
+/***************************************************************************/
 
   if (rpmonly)
     {
@@ -1115,6 +1167,8 @@ oaretry1:
 	}
     }
   bfd->close(bfd);
+
+  /* fd == -1 in "alone" mode */
   if (fd != -1 && strcmp(rpmname, "-") != 0)
     close(fd);
 
@@ -1129,95 +1183,9 @@ oaretry1:
   filelinktos = xfree(filelinktos);
   filenames = xfree(filenames);
   filecolors = xfree(filecolors);
-  if (!alone)
-    h = xfree(h);
+  h = xfree(h);
 
 /****************************************************************/
-
-  if (!alone)
-    {
-      /* read in new rpm */
-      if (verbose)
-	fprintf(vfp, "reading new rpm...\n");
-      rpmname = argv[argc - 2];
-      if (!strcmp(rpmname, "-"))
-	fd = 0;
-      else if ((fd = open(rpmname, O_RDONLY)) < 0)
-	{
-	  perror(rpmname);
-	  exit(1);
-	}
-      if (read(fd, rpmlead, 96) != 96 || rpmlead[0] != 0xed || rpmlead[1] != 0xab || rpmlead[2] != 0xee || rpmlead[3] != 0xdb)
-	{
-	  fprintf(stderr, "%s: not a rpm\n", rpmname);
-	  exit(1);
-	}
-      if (rpmlead[4] != 0x03 || rpmlead[0x4e] != 0 || rpmlead[0x4f] != 5)
-	{
-	  fprintf(stderr, "%s: not a v3 rpm or not new header styles\n", rpmname);
-	  exit(1);
-	}
-      sigh = readhead(fd, 1);
-      if (!sigh)
-	{
-	  fprintf(stderr, "could not read signature header\n");
-	  exit(1);
-	}
-      d.h = readhead(fd, 0);
-      if (!d.h)
-	{
-	  fprintf(stderr, "could not read header\n");
-	  exit(1);
-	}
-      rpmMD5Init(&fullmd5);
-      rpmMD5Update(&fullmd5, rpmlead, 96);
-      rpmMD5Update(&fullmd5, sigh->intro, 16);
-      rpmMD5Update(&fullmd5, sigh->data, sigh->cnt * 16 + sigh->dcnt);
-      rpmMD5Update(&fullmd5, d.h->intro, 16);
-      rpmMD5Update(&fullmd5, d.h->data, d.h->cnt * 16 + d.h->dcnt);
-      if (rpmonly)
-	{
-	  /* add new header to cpio */
-	  addtocpio(&newcpio, &newcpiolen, d.h->intro, 16);
-	  addtocpio(&newcpio, &newcpiolen, d.h->data, 16 * d.h->cnt + d.h->dcnt);
-	}
-      fullsize = 96 + 16 + sigh->cnt * 16 + sigh->dcnt + 16 + d.h->cnt * 16 + d.h->dcnt;
-      newbz = cfile_open(CFILE_OPEN_RD, fd, 0, CFILE_COMP_XX, CFILE_LEN_UNLIMITED, (cfile_ctxup)rpmMD5Update, &fullmd5);
-      if (!newbz)
-	{
-	  fprintf(stderr, "payload open failed\n");
-	  exit(1);
-	}
-      if (cfile_detect_rsync(newbz))
-	{
-	  fprintf(stderr, "detect_rsync failed\n");
-	  exit(1);
-	}
-      targetcomp = newbz->comp;
-      if ((payloadflags = headstring(d.h, TAG_PAYLOADFLAGS)) != 0)
-	if (*payloadflags >= '1' && *payloadflags <= '9')
-	  targetcomp = cfile_setlevel(targetcomp, *payloadflags - '0');
-      if (paycomp == CFILE_COMP_XX)
-	paycomp = targetcomp;
-      if (addblkcomp == CFILE_COMP_XX)
-	addblkcomp = targetcomp;
-      while ((l = newbz->read(newbz, buf, sizeof(buf))) > 0)
-	addtocpio(&newcpio, &newcpiolen, (unsigned char *)buf, l);
-      if (l < 0)
-	{
-	  fprintf(stderr, "payload read failed\n");
-	  exit(1);
-	}
-      fullsize += newbz->bytes;
-      if (newbz->close(newbz))
-	{
-	  fprintf(stderr, "junk at end of payload\n");
-	  exit(1);
-	}
-      if (strcmp(rpmname, "-") != 0)
-	close(fd);
-      rpmMD5Final(fullmd5res, &fullmd5);
-    }
 
   payformat = headstring(d.h, TAG_PAYLOADFORMAT);
   if (!payformat || strcmp(payformat, "cpio") != 0)
@@ -1230,6 +1198,9 @@ oaretry1:
   d.addblk = 0;
   d.addblklen = 0;
   mkdiff(DELTAMODE_HASH | (addblkcomp == -1 ? DELTAMODE_NOADDBLK : 0), oldcpio, oldcpiolen, newcpio, newcpiolen, &instr, &instrlen, (unsigned char **)0, (unsigned int *)0, (addblkcomp == CFILE_COMP_BZ ? &d.addblk : 0), (addblkcomp == CFILE_COMP_BZ ? &d.addblklen : 0), (unsigned char **)0, (unsigned int *)0);
+
+/****************************************************************/
+
   if (verbose)
     fprintf(vfp, "writing delta rpm...\n");
   if (addblkcomp != -1 && addblkcomp != CFILE_COMP_BZ)
