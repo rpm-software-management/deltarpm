@@ -124,7 +124,6 @@ prelinked_open(char *name)
 {
   pid_t pid;
   int fd, status;
-  int p[2];
   struct stat stb;
   char template[21];
 
