@@ -835,6 +835,7 @@ main(int argc, char **argv)
       addtocpio(&newcpio, &newcpiolen, d.h->intro, 16);
       addtocpio(&newcpio, &newcpiolen, d.h->data, 16 * d.h->cnt + d.h->dcnt);
     }
+  fullsize = 96 + 16 + sigh->cnt * 16 + sigh->dcnt + 16 + d.h->cnt * 16 + d.h->dcnt;
   newbz = cfile_open(CFILE_OPEN_RD, nfd, 0, CFILE_COMP_XX, CFILE_LEN_UNLIMITED, (cfile_ctxup)rpmMD5Update, &fullmd5);
   if (!newbz)
     {
