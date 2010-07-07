@@ -802,7 +802,13 @@ static void addoff(struct bzblock *bzi, bsint off)
   blockwrite(bzi, b, 8);
 }
 
-void mkdiff(int mode, unsigned char *old, bsuint oldlen, unsigned char *new, bsuint newlen, struct instr **instrp, int *instrlenp, unsigned char **instrblkp, unsigned int *instrblklenp, unsigned char **addblkp, unsigned int *addblklenp, unsigned char **extrablkp, unsigned int *extrablklenp)
+void mkdiff(int mode,
+            unsigned char *old, bsuint oldlen,
+            unsigned char *new, bsuint newlen,
+            struct instr **instrp, int *instrlenp,
+            unsigned char **instrblkp, unsigned int *instrblklenp,
+            unsigned char **addblkp, unsigned int *addblklenp,
+            unsigned char **extrablkp, unsigned int *extrablklenp)
 {
   struct instr *instr = 0;
   int instrlen = 0;
@@ -872,21 +878,28 @@ void mkdiff(int mode, unsigned char *old, bsuint oldlen, unsigned char *new, bsu
     }
 
   scan = 0; len = 0; lenf = 0;
-  lastscan = 0; lastpos = 0; lastoffset = 0;
+  lastscan = 0; lastpos = 0;
 
-  while (scan < newlen)
+  while (lastscan < newlen)
     {
-      if (noaddblk)
-	{
-	  lastoffset = oldlen;
-	  lenf = len;
-	}
-      scan += len;
+      /* search for data matching something in new[scan...]
+       * input:
+       *   old/oldlen, new/newlen: search data
+       *   lastoffset: lastpos - lastscan  (because we want to find a different match)
+       * returns:
+       *   scan: start of match in new[]
+       *   pos:  start of match in old[]
+       *   len:  length of match
+       * (if no match is found, scan = newlen, len = 0)
+       */
+      lastoffset = noaddblk ? oldlen : lastpos - lastscan;
       scan = dm->findnext(data, old, oldlen, new, newlen, lastoffset, scan, &pos, &len);
+
+      /* extand old match forward */
       if (!noaddblk)
 	{
 	  s = Sf = lenf = 0;
-	  for(i = 0; lastscan + i < scan && lastpos + i < oldlen; )
+	  for (i = 0; lastscan + i < scan && lastpos + i < oldlen; )
 	    {
 	      if (old[lastpos+i] == new[lastscan+i])
 		{
@@ -902,7 +915,16 @@ void mkdiff(int mode, unsigned char *old, bsuint oldlen, unsigned char *new, bsu
 	        i++;
 	    }
 	}
+      else
+	{
+	  for (i = 0; lastscan + i < scan && lastpos + i < oldlen; )
+	    if (old[lastpos+i] != new[lastscan+i])
+	      break;
+	  lenf = i;
+	}
+
       lenb = 0;
+      /* extand new match backward, scan == newlen means we're going to finish */
       if (!noaddblk && scan < newlen)
 	{
 	  s = Sb = 0;
@@ -919,11 +941,13 @@ void mkdiff(int mode, unsigned char *old, bsuint oldlen, unsigned char *new, bsu
 		}
 	    }
 	}
+
+      /* if there is an overlap find good place to split */
       if (lastscan + lenf > scan - lenb)
 	{
 	  overlap = (lastscan + lenf) - (scan - lenb);
 	  s = Sb = Ss = lens = 0;
-	  for(i = 0; i < overlap; i++)
+	  for (i = 0; i < overlap; i++)
 	    {
 	      if(new[lastscan + lenf - overlap + i] == old[lastpos + lenf - overlap + i])
 		s++;
@@ -938,6 +962,19 @@ void mkdiff(int mode, unsigned char *old, bsuint oldlen, unsigned char *new, bsu
 	  lenf -= overlap - lens;
 	  lenb -= lens;
 	}
+
+      /*
+       *         lastscan                    scan
+       *            |--- lenf ---|    |- lenb -|-- len --|
+       *            |            |    |        |         |
+       * new: ------+=======-----+----+--------+=========+--
+       *           /                           \
+       *          /                             |
+       * old: ---+=======-----------------------+=========---
+       *         |                              |
+       *      lastpos                          pos
+       */
+
       if (instrp)
 	{
 	  if ((instrlen & 31) == 0)
@@ -976,32 +1013,30 @@ void mkdiff(int mode, unsigned char *old, bsuint oldlen, unsigned char *new, bsu
 	      s -= len2;
 	    }
 	}
-      if (!bza)
+      if (bza)
 	{
-	  lastscan += lenf;
-	  lastpos += lenf;
+	  while (lenf > 0)
+	    {
+	      unsigned char addblk[4096];
+	      int len2;
+	      len2 = lenf > 4096 ? 4096 : lenf;
+	      for (i = 0; i < len2; i++)
+		addblk[i] = new[lastscan + i] - old[lastpos + i];
+	      if (blockwrite(bza, addblk, len2) != len2)
+		{
+		  fprintf(stderr, "could not append to data block\n");
+		  exit(1);
+		}
+	      lastscan += len2;
+	      lastpos += len2;
+	      lenf -= len2;
+	    }
 	}
-      else
-	while (lenf > 0)
-	  {
-	    unsigned char addblk[4096];
-	    int len2;
-	    len2 = lenf > 4096 ? 4096 : lenf;
-	    for (i = 0; i < len2; i++)
-	      addblk[i] = new[lastscan + i] - old[lastpos + i];
-	    if (blockwrite(bza, addblk, len2) != len2)
-	      {
-		fprintf(stderr, "could not append to data block\n");
-		exit(1);
-	      }
-	    lastscan += len2;
-	    lastpos += len2;
-	    lenf -= len2;
-	  }
 
+      /* advance */
       lastscan = scan - lenb;
       lastpos = pos - lenb;
-      lastoffset = pos - scan;
+      scan += len;
     }
   if (bza && blockclose(bza, addblkp, addblklenp))
     {
@@ -1025,3 +1060,4 @@ void mkdiff(int mode, unsigned char *old, bsuint oldlen, unsigned char *new, bsu
     }
   dm->free(data);
 }
+
