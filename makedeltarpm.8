@@ -1,7 +1,7 @@
 .\" man page for makedeltarpm
-.\" Copyright (c) 2005 Michael Schroeder <mls@suse.de>
+.\" Copyright (c) 2010 Michael Schroeder <mls@suse.de>
 .\" See LICENSE.BSD for license
-.TH MAKEDELTARPM 8 "Feb 2005"
+.TH MAKEDELTARPM 8 "Jul 2010"
 .SH NAME
 makedeltarpm \- create a deltarpm from two rpms
 
@@ -12,6 +12,8 @@ makedeltarpm \- create a deltarpm from two rpms
 .IR version ]
 .RB [ -z
 .IR compression ]
+.RB [ -m
+.IR mbytes ]
 .RB [ -s
 .IR seqfile ]
 .RB [ -r ]
@@ -79,6 +81,17 @@ makedeltarpm can also create an "identity" deltarpm by adding the
 switch. In this case only one rpm has to be specified. An identity
 deltarpm can be useful to just replace the signature header of a
 rpm or to reconstruct a rpm from the filesystem.
+
+.SH MEMORY CONSIDERATIONS
+makedeltarpm normally needs about three to four times the size
+of the rpm's uncompressed payload. You can use the
+.B -m
+option to enable a sliding block algorithm that needs
+.IR mbytes
+megabytes of memory. This trades memory usage with the size of
+the created deltarpm. Furthermore, the uncompressed deltarpm
+payload is currently also stored in memory when this option is
+used, but it tends to be small in most cases.
 
 .SH SEE ALSO
 .BR applydeltarpm (8)

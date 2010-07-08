@@ -60,6 +60,11 @@ the
 .B -i
 option.
 
+.SH MEMORY CONSIDERATIONS
+applydeltarpm was written to work on systems with limited memory.
+It uses a paging algorithm to keep the size of in-core data low
+and not bring the system in an out-of-memory situation.
+
 .SH EXIT STATUS
 applydeltarpm returns 0 if the rpm could be recreated or the
 checking succeeded, it returns 1 and prints an error message
