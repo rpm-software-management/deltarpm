@@ -917,7 +917,7 @@ void mkdiff(int mode,
 	}
       else
 	{
-	  for (i = 0; lastscan + i < scan && lastpos + i < oldlen; )
+	  for (i = 0; lastscan + i < scan && lastpos + i < oldlen; i++)
 	    if (old[lastpos+i] != new[lastscan+i])
 	      break;
 	  lenf = i;
@@ -1061,3 +1061,174 @@ void mkdiff(int mode,
   dm->free(data);
 }
 
+struct stepdata {
+  struct deltamode *dm;
+  void *data;
+  int noaddblk;
+};
+
+void *
+mkdiff_step_setup(int mode)
+{
+  int noaddblk = 0;
+  struct stepdata *sd;
+  struct deltamode *dm;
+  int i;
+
+  if ((mode & DELTAMODE_NOADDBLK) != 0)
+    {
+      mode ^= DELTAMODE_NOADDBLK;
+      noaddblk = 1;
+    }
+  dm = 0;
+  for (i = 0; i < sizeof(deltamodes)/sizeof(*deltamodes); i++)
+    {
+      dm = deltamodes + i;
+      if (deltamodes[i].mode == mode)
+	break;
+    }
+  if (!dm)
+    {
+      fprintf(stderr, "mkdiff: no mode installed\n");
+      exit(1);
+    }
+  sd = calloc(1, sizeof(*sd));
+  if (!sd)
+    return 0;
+  sd->dm = dm;
+  sd->data = 0;
+  sd->noaddblk = noaddblk;
+  return sd;
+}
+
+void
+mkdiff_step(void *sdata,
+            unsigned char *old, bsuint oldlen,
+            unsigned char *new, bsuint newlen,
+            struct instr *instr,
+	    bsuint *scanp, bsuint *lastposp, bsuint *lastscanp)
+  
+{
+  struct stepdata *sd = sdata;
+  struct deltamode *dm = sd->dm;
+  bsuint scan, lastpos, lastscan;
+  bsuint pos, len, lastoffset;
+  bsuint s, Sf, lenf, Sb, lenb;
+  bsuint overlap, Ss, lens;
+  bsuint i;
+
+  if (!sd->data)
+    {
+      sd->data = dm->create(old, oldlen);
+      if (!sd->data)
+	{
+	  fprintf(stderr, "mkdiff: could not create data\n");
+	  exit(1);
+	}
+    }
+  scan = *scanp;
+  lastscan = *lastscanp;
+  lastpos = *lastposp;
+
+  lastoffset = sd->noaddblk ? oldlen : lastpos - lastscan;
+  scan = dm->findnext(sd->data, old, oldlen, new, newlen, lastoffset, scan, &pos, &len);
+  if (!sd->noaddblk)
+    {
+      s = Sf = lenf = 0;
+      for (i = 0; lastscan + i < scan && lastpos + i < oldlen; )
+	{
+	  if (old[lastpos+i] == new[lastscan+i])
+	    {
+	      s++;
+	      i++;
+	      if (s >= Sf + i - s)
+		{
+		  Sf = 2 * s - i;
+		  lenf = i;
+		}
+	    }
+	  else
+	    i++;
+	}
+    }
+  else
+    {
+      for (i = 0; lastscan + i < scan && lastpos + i < oldlen; i++)
+	if (old[lastpos+i] != new[lastscan+i])
+	  break;
+      lenf = i;
+    }
+
+  lenb = 0;
+  /* extand new match backward, scan == newlen means we're going to finish */
+  if (!sd->noaddblk && scan < newlen)
+    {
+      s = Sb = 0;
+      for(i = 1; scan >= lastscan + i && pos >= i; i++)
+	{
+	  if (old[pos-i] == new[scan-i])
+	    {
+	      s++;
+	      if(s >= Sb + i - s)
+		{
+		  Sb = 2 * s - i;
+		  lenb = i;
+		}
+	    }
+	}
+    }
+
+  /* if there is an overlap find good place to split */
+  if (lastscan + lenf > scan - lenb)
+    {
+      overlap = (lastscan + lenf) - (scan - lenb);
+      s = Sb = Ss = lens = 0;
+      for (i = 0; i < overlap; i++)
+	{
+	  if(new[lastscan + lenf - overlap + i] == old[lastpos + lenf - overlap + i])
+	    s++;
+	  if(new[scan - lenb + i] == old[pos - lenb + i])
+	    Sb++;
+	  if (s > Sb && s - Sb > Ss)
+	    {
+	      Ss = s - Sb;
+	      lens = i + 1;
+	    }
+	}
+      lenf -= overlap - lens;
+      lenb -= lens;
+    }
+
+  /* printf("MATCH len %d @ %d:%d-%d-%d:%d -- %d\n", len, lastscan, lenf, (scan - lenb) - (lastscan + lenf), lenb, scan, pos); */
+
+  instr->copyout = lenf;
+  instr->copyin = (scan - lenb) - (lastscan + lenf);
+  instr->copyinoff = lastscan + lenf;
+  instr->copyoutoff = lastpos;
+  *scanp = scan + len;
+  *lastscanp = scan - lenb;
+  if (scan != newlen)
+    *lastposp = pos - lenb;
+  else
+    *lastposp = lastpos + lenf;
+}
+
+void
+mkdiff_step_freedata(void *sdata)
+{
+  struct stepdata *sd = sdata;
+  struct deltamode *dm = sd->dm;
+  if (sd->data)
+    dm->free(sd->data);
+  sd->data = 0;
+}
+
+void
+mkdiff_step_free(void *sdata)
+{
+  struct stepdata *sd = sdata;
+  struct deltamode *dm = sd->dm;
+  if (sd->data)
+    dm->free(sd->data);
+  free(sd);
+}

@@ -219,10 +219,208 @@ is_unpatched(char *n, struct rpmlfile *files1, int nfiles1, struct rpmlfile *fil
   return 0;
 }
 
+struct streamdata {
+  bsuint bsize;
+
+  unsigned char *old;
+  bsuint oldl;
+  bsuint oldskip;
+  int oldeof;
+
+  unsigned char *new;
+  bsuint newl;
+  bsuint newskip;
+  int neweof;
+
+  struct cfile *newf;
+  unsigned char *xnewdata;
+  bsuint xnewdatal;
+
+  void *stepd;
+  bsuint scan;
+  bsuint lastpos;
+  bsuint lastscan;
+
+  struct cfile *cfa;	/* add block */
+  struct cfile *cfi;	/* in data */
+
+  struct instr *instr;
+  int instrlen;
+};
+
+struct streamdata sd;	/* hack: global for now */
+
+void
+addtocpio_stream(unsigned char *d, int l)
+{
+  bsuint bsize = sd.bsize;
+  if (sd.lastscan == sd.newl && sd.neweof)
+    {
+      sd.oldskip += sd.oldl + l;
+      sd.oldl = 0;
+      return;
+    }
+  for (;;)
+    {
+      if (sd.oldl < bsize && !sd.oldeof)
+	{
+	  int l2 = bsize - sd.oldl;
+	  if (l2 > l)
+	    l2 = l;
+	  memcpy(sd.old + sd.oldl, d, l2);
+	  sd.oldl += l2;
+          l -= l2;
+	  d += l2;
+	  if (sd.oldl < bsize)
+	    return;
+	}
+      while (sd.newl < bsize && !sd.neweof)
+	{
+	  int l2 = bsize - sd.newl;
+	  if (sd.xnewdatal)
+	    {
+	      if (l2 > sd.xnewdatal)
+		l2 = sd.xnewdatal;
+	      memcpy(sd.new + sd.newl, sd.xnewdata, l2);
+	      sd.newl += l2;
+	      sd.xnewdata += l2;
+	      sd.xnewdatal -= l2;
+	      continue;
+	    }
+	  l2 = sd.newf->read(sd.newf, sd.new + sd.newl, l2);
+	  if (l2 < 0)
+	    {
+	      fprintf(stderr, "payload read failed\n");
+	      exit(1);
+	    }
+	  if (l2 == 0)
+	    sd.neweof = 1;
+	  sd.newl += l2;
+	}
+      if (sd.lastscan != sd.newl)
+	{
+	  struct instr instr;
+	  mkdiff_step(sd.stepd, sd.old, sd.oldl, sd.new, sd.newl, &instr, &sd.scan, &sd.lastpos, &sd.lastscan);
+	  if (instr.copyout && !sd.oldeof && (sd.lastscan == sd.newl || instr.copyoutoff + instr.copyout == sd.oldl))
+	    {
+	      /* incomplete match, ignore indata part */
+	      instr.copyin = 0;
+	      sd.scan = sd.lastscan = instr.copyinoff;
+	      sd.lastpos = instr.copyoutoff + instr.copyout;
+	    }
+	  else if (!instr.copyout && sd.lastscan == sd.newl)
+	    {
+	      /* no match found in old data, advance... */
+	      sd.lastpos = sd.oldl;
+	    }
+	  /* printf("INSTR: %d@%d %d@%d\n", instr.copyout, instr.copyoutoff + sd.oldskip, instr.copyin, instr.copyinoff + sd.newskip); */
+	  if (instr.copyin)
+	    {
+	      if (instr.copyinoff + instr.copyin > sd.newl)
+		abort();
+	      if (sd.cfi->write(sd.cfi, sd.new + instr.copyinoff, instr.copyin) != instr.copyin)
+		{
+		  fprintf(stderr, "could not create indata block\n");
+		  exit(1);
+		}
+	    }
+	  if (instr.copyout && sd.cfa)
+	    {
+	      bsuint lenf = instr.copyout;
+	      bsuint lastpos = instr.copyoutoff;
+	      bsuint lastscan = instr.copyinoff - lenf;
+	      if (instr.copyoutoff + instr.copyout > sd.oldl)
+		abort();
+	      if (instr.copyinoff - lenf + instr.copyout > sd.newl)
+		abort();
+	      while (lenf > 0) 
+		{
+		  unsigned char addblk[4096];
+		  int len2, i;
+
+		  len2 = lenf > 4096 ? 4096 : lenf;
+		  for (i = 0; i < len2; i++) 
+		    addblk[i] = sd.new[lastscan + i] - sd.old[lastpos + i];
+		  if (sd.cfa->write(sd.cfa, addblk, len2) != len2)
+		    {
+		      fprintf(stderr, "could not create compressed add block\n");
+		      exit(1);
+		    }
+		  lastscan += len2;
+		  lastpos += len2;
+		  lenf -= len2;
+		}
+	    }
+	  instr.copyinoff += sd.newskip;
+	  instr.copyoutoff += sd.oldskip;
+	  if (sd.instrlen && sd.instr[sd.instrlen - 1].copyin == 0 && sd.instr[sd.instrlen - 1].copyoutoff + sd.instr[sd.instrlen - 1].copyout == instr.copyoutoff)
+	    {
+	      /* just add to last instruction */
+	      sd.instr[sd.instrlen - 1].copyin = instr.copyin;
+	      sd.instr[sd.instrlen - 1].copyinoff = instr.copyinoff;
+	      sd.instr[sd.instrlen - 1].copyout += instr.copyout;
+	    }
+	  else if (instr.copyin || instr.copyout)
+	    {
+	      if ((sd.instrlen & 31) == 0)
+		{
+		  if (sd.instr)
+		    sd.instr = realloc(sd.instr, sizeof(*sd.instr) * (sd.instrlen + 32));
+		  else
+		    sd.instr = malloc(sizeof(*sd.instr) * (sd.instrlen + 32));
+		  if (!sd.instr)
+		    {
+		      fprintf(stderr, "out of memory\n");
+		      exit(1);
+		    }
+		}
+	      sd.instr[sd.instrlen] = instr;
+	      sd.instrlen++;
+	    }
+	}
+      if (sd.lastscan > bsize / 4 && !sd.neweof)
+	{
+	  if (sd.newl > sd.lastscan)
+	    memmove(sd.new, sd.new + sd.lastscan, sd.newl - sd.lastscan);
+	  sd.newl -= sd.lastscan;
+	  sd.newskip += sd.lastscan;
+	  sd.scan -= sd.lastscan;
+	  sd.lastscan = 0;
+	}
+      if (sd.lastpos > bsize / 2 && !sd.oldeof)
+	{
+	  bsuint move = sd.lastpos - bsize / 4;
+	  if (sd.lastpos + sd.oldskip + bsize < sd.lastscan + sd.newskip)
+	    move = sd.lastpos;
+	  if (move > sd.lastpos)
+	    move = sd.lastpos;
+	  if (sd.oldl > move)
+	    memmove(sd.old, sd.old + move, sd.oldl - move);
+	  sd.oldl -= move;
+	  sd.oldskip += move;
+	  sd.lastpos -= move;
+	  mkdiff_step_freedata(sd.stepd);
+	}
+      if (sd.lastscan == sd.newl && sd.neweof)
+	{
+	  sd.oldskip += sd.oldl + l;
+	  sd.oldl = 0;
+	  mkdiff_step_freedata(sd.stepd);
+	  return;
+	}
+    }
+}
+
 void
 addtocpio(unsigned char **cpiop, bsuint *cpiol, unsigned char *d, int l)
 {
   bsuint cpl = *cpiol;
+  if (*cpiop == (unsigned char *)&sd)
+    {
+      *cpiol += l;
+      addtocpio_stream(d, l);
+      return;
+    }
   if (cpl + l < cpl || cpl + l + 65535 < cpl + l)
     {
       fprintf(stderr, "cpio archive to big\n");
@@ -234,22 +432,19 @@ addtocpio(unsigned char **cpiop, bsuint *cpiol, unsigned char *d, int l)
   *cpiol = cpl + l;
 }
 
-unsigned char **
-convertinstr(struct instr *instr, int instrlen, struct deltarpm *d, unsigned char *new)
+void
+convertinstr(struct instr *instr, int instrlen, struct deltarpm *d)
 {
   int i, j;
   bsuint x1, x2, x3, off;
-  unsigned int insize;
   unsigned int *b1;
   int nb1;
   unsigned int *b2;
   int nb2;
-  unsigned char **indatalist;
 
   b1 = b2 = 0;
   nb1 = nb2 = 0;
   j = 0;
-  insize = 0;
   off = 0;
   for (i = 0; i < instrlen; i++)
     {
@@ -307,13 +502,11 @@ retry2:
 	    {
 	      b1[2 * nb1 + 1] = 0x7fffffff;
 	      x2 -= 0x7fffffff;
-              insize += 0x7fffffff;
 	      nb1++;
 	      goto retry2;
 	    }
           b1[2 * nb1 + 1] = x2;
           nb1++;
-          insize += x2;
         }
     }
   if (j)
@@ -328,18 +521,47 @@ retry2:
   d->in = b1;
   d->outn = nb2;
   d->out = b2;
-  indatalist = xmalloc2(nb1, sizeof(unsigned char *));
-  for (i = j = 0; i < instrlen; i++)
-    if (instr[i].copyin)
-      indatalist[j++] = new + instr[i].copyinoff;
-  d->inlen = insize;
-  d->indata = 0;
+}
+
+unsigned char **
+createindatalist(struct instr *instr, int instrlen, struct deltarpm *d, unsigned char *new)
+{
+  int i, j;
+  bsuint off, left, todo;
+  unsigned char **indatalist;
+  
+  left = off = 0;
+  j = 0;
+  d->inlen = 0;
+  indatalist = xcalloc(d->inn, sizeof(unsigned char *));
+  for (i = 0; i < d->inn; i++)
+    {
+      todo = d->in[2 * i + 1];
+      while (!left && todo)
+	{
+	  off = instr[j].copyinoff;
+	  left = instr[j].copyin;
+	  j++;
+	}
+      indatalist[i] = new + off;
+      off += todo;
+      left -= todo;
+      d->inlen += todo;
+    }
   return indatalist;
 }
 
 int
 str2comp(char *comp)
 {
+  int n = strlen(comp);
+  if (n > 2 && n < 20 && comp[n - 2] == '.' && comp[n - 1] >= '0' && comp[n - 1] <= '9')
+    {
+      char buf[20];
+      strcpy(buf, comp);
+      buf[n - 2] = 0;
+      return cfile_setlevel(str2comp(buf), comp[n - 1] - '0');
+    }
   if (!strcmp(comp, "bzip2"))
     return CFILE_COMP_BZ;
   if (!strcmp(comp, "gzip"))
@@ -495,7 +717,7 @@ main(int argc, char **argv)
   int verbose = 0;
   int version = 3;
   struct deltarpm d;
-  unsigned char **indatalist;
+  unsigned char **indatalist = 0;
   int rpmonly = 0;
   int alone = 0;
   FILE *vfp = 0;
@@ -506,8 +728,11 @@ main(int argc, char **argv)
   int targetcomp = CFILE_COMP_XX;
   char *payloadflags;
 
+  bsuint stream = 0;
+
   memset(&d, 0, sizeof(d));
-  while ((c = getopt(argc, argv, "vV:prl:s:z:u")) != -1)
+  memset(&sd, 0, sizeof(sd));
+  while ((c = getopt(argc, argv, "vV:prl:s:z:um:")) != -1)
     {
       switch (c)
 	{
@@ -534,6 +759,9 @@ main(int argc, char **argv)
 	  break;
 	case 'z':
 	  compopt = optarg;
+	  break;
+	case 'm':
+	  stream = atoi(optarg) * (1024 * 256);
 	  break;
 	default:
 	  fprintf(stderr, "usage: makedeltarpm [-l <file>] [-s seq] oldrpm newrpm deltarpm\n");
@@ -737,6 +965,7 @@ main(int argc, char **argv)
       d.lead = xfree(d.lead);
       d.leadl = 0;
       seq = xfree(seq);
+      d.targetnevr = xfree(d.targetnevr);
       exit(0);
     }
 
@@ -787,6 +1016,7 @@ main(int argc, char **argv)
       fd = -1;
       d.h = h;
       h = 0;
+      stream = 0;	/* sorry! */
     }
   else
     {
@@ -855,22 +1085,33 @@ main(int argc, char **argv)
     paycomp = targetcomp;
   if (addblkcomp == CFILE_COMP_XX)
     addblkcomp = targetcomp;
-  while ((l = newbz->read(newbz, buf, sizeof(buf))) > 0)
-    addtocpio(&newcpio, &newcpiolen, (unsigned char *)buf, l);
-  if (l < 0)
+
+  if (stream)
     {
-      fprintf(stderr, "payload read failed\n");
-      exit(1);
+      memset(&sd, 0, sizeof(sd));
+      sd.xnewdata = newcpio;
+      sd.xnewdatal = newcpiolen;
+      sd.newf = newbz;
+      sd.bsize = stream;
+      sd.old = xmalloc(sd.bsize);
+      sd.new = xmalloc(sd.bsize);
+      if (addblkcomp != -1)
+        sd.cfa = cfile_open(CFILE_OPEN_WR, CFILE_IO_ALLOC, &d.addblk, addblkcomp, CFILE_LEN_UNLIMITED, 0, 0);
+      sd.cfi = cfile_open(CFILE_OPEN_WR, CFILE_IO_ALLOC, &d.indata, CFILE_COMP_UN, CFILE_LEN_UNLIMITED, 0, 0);
+      oldcpio = (void *)&sd;
+      oldcpiolen = 0;
+      sd.stepd = mkdiff_step_setup(DELTAMODE_HASH | (addblkcomp == -1 ? DELTAMODE_NOADDBLK : 0));
     }
-  fullsize += newbz->bytes;
-  if (newbz->close(newbz))
+  else
     {
-      fprintf(stderr, "junk at end of payload\n");
-      exit(1);
+      while ((l = newbz->read(newbz, buf, sizeof(buf))) > 0)
+	addtocpio(&newcpio, &newcpiolen, (unsigned char *)buf, l);
+      if (l < 0)
+	{
+	  fprintf(stderr, "payload read failed\n");
+	  exit(1);
+	}
     }
-  if (strcmp(rpmname, "-") != 0)
-    close(nfd);
-  rpmMD5Final(fullmd5res, &fullmd5);
 
 /***************************************************************************/
 
@@ -879,7 +1120,8 @@ main(int argc, char **argv)
       /* add old header to cpio */
       addtocpio(&oldcpio, &oldcpiolen, h->intro, 16);
       addtocpio(&oldcpio, &oldcpiolen, h->data, 16 * h->cnt + h->dcnt);
-      rpmMD5Update(&seqmd5, oldcpio, oldcpiolen);
+      rpmMD5Update(&seqmd5, h->intro, 16);
+      rpmMD5Update(&seqmd5, h->data, 16 * h->cnt + h->dcnt);
       bfd = cfile_open(CFILE_OPEN_RD, fd, 0, CFILE_COMP_XX, CFILE_LEN_UNLIMITED, (cfile_ctxup)rpmMD5Update, &seqmd5);
     }
   else if (alone)
@@ -1169,8 +1411,27 @@ oaretry1:
     }
   bfd->close(bfd);
 
+  if (stream)
+    {
+      /* finish */
+      sd.oldeof = 1;
+      addtocpio(&oldcpio, &oldcpiolen, 0, 0);
+      if (sd.cfa)
+        d.addblklen = sd.cfa->close(sd.cfa);
+      d.inlen = sd.cfi->close(sd.cfi);
+      sd.cfa = 0;
+      sd.cfi = 0;
+      instr = sd.instr;
+      sd.instr = 0;
+      instrlen = sd.instrlen;
+      sd.instrlen = 0;
+      mkdiff_step_free(sd.stepd);
+      oldcpio = 0;
+    }
+
+  /* close old rpm */
   /* fd == -1 in "alone" mode */
-  if (fd != -1 && strcmp(rpmname, "-") != 0)
+  if (fd != -1 && strcmp(argv[argc - 3 + alone], "-") != 0)
     close(fd);
 
   rpmMD5Final(seqmd5res, &seqmd5);
@@ -1186,6 +1447,17 @@ oaretry1:
   filecolors = xfree(filecolors);
   h = xfree(h);
 
+  /* close new rpm */
+  fullsize += newbz->bytes;
+  if (newbz->close(newbz))
+    {
+      fprintf(stderr, "junk at end of payload\n");
+      exit(1);
+    }
+  if (strcmp(rpmname, "-") != 0)
+    close(nfd);
+  rpmMD5Final(fullmd5res, &fullmd5);
+
 /****************************************************************/
 
   payformat = headstring(d.h, TAG_PAYLOADFORMAT);
@@ -1194,17 +1466,20 @@ oaretry1:
       fprintf(stderr, "payload format is not cpio\n");
       exit(1);
     }
-  if (verbose)
-    fprintf(vfp, "creating diff...\n");
-  d.addblk = 0;
-  d.addblklen = 0;
-  mkdiff(DELTAMODE_HASH | (addblkcomp == -1 ? DELTAMODE_NOADDBLK : 0), oldcpio, oldcpiolen, newcpio, newcpiolen, &instr, &instrlen, (unsigned char **)0, (unsigned int *)0, (addblkcomp == CFILE_COMP_BZ ? &d.addblk : 0), (addblkcomp == CFILE_COMP_BZ ? &d.addblklen : 0), (unsigned char **)0, (unsigned int *)0);
+  if (!stream)
+    {
+      if (verbose)
+	fprintf(vfp, "creating diff...\n");
+      d.addblk = 0;
+      d.addblklen = 0;
+      mkdiff(DELTAMODE_HASH | (addblkcomp == -1 ? DELTAMODE_NOADDBLK : 0), oldcpio, oldcpiolen, newcpio, newcpiolen, &instr, &instrlen, (unsigned char **)0, (unsigned int *)0, (addblkcomp == CFILE_COMP_BZ ? &d.addblk : 0), (addblkcomp == CFILE_COMP_BZ ? &d.addblklen : 0), (unsigned char **)0, (unsigned int *)0);
+    }
 
 /****************************************************************/
 
   if (verbose)
     fprintf(vfp, "writing delta rpm...\n");
-  if (addblkcomp != -1 && addblkcomp != CFILE_COMP_BZ)
+  if (!stream && addblkcomp != -1 && addblkcomp != CFILE_COMP_BZ)
     createaddblock(instr, instrlen, &d, oldcpio, newcpio, addblkcomp);
   d.name = argv[argc - 1];
   d.version = 0x444c5430 + version;
@@ -1214,7 +1489,9 @@ oaretry1:
   memcpy(d.lead, rpmlead, 96);
   memcpy(d.lead + 96, sigh->intro, 16);
   memcpy(d.lead + 96 + 16, sigh->data, d.leadl - 96 - 16);
-  indatalist = convertinstr(instr, instrlen, &d, newcpio);
+  convertinstr(instr, instrlen, &d);
+  if (!stream)
+    indatalist = createindatalist(instr, instrlen, &d, newcpio);
   d.nevr = nevr;
   d.seql = 16 + (seqp + 1) / 2;
   d.seq = xmalloc(d.seql);
@@ -1246,6 +1523,7 @@ oaretry1:
   sigh = xfree(sigh);
   d.h = xfree(d.h);
   indatalist = xfree(indatalist);
+  d.indata = xfree(d.indata);
   d.in = xfree(d.in);
   d.out = xfree(d.out);
   d.inn = d.outn = 0;
@@ -1255,5 +1533,10 @@ oaretry1:
   d.leadl = 0;
   nevr = xfree(nevr);
   seq = xfree(seq);
+  sd.old = xfree(sd.old);
+  sd.new = xfree(sd.new);
+  offadjs = xfree(offadjs);
+  d.targetnevr = xfree(d.targetnevr);
   exit(0);
 }
+

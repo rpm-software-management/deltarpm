@@ -16,6 +16,13 @@ struct instr {
 
 void mkdiff(int mode, unsigned char *old, bsuint oldlen, unsigned char *new, bsuint newlen, struct instr **instrp, int *instrlenp, unsigned char **instrblkp, unsigned int *instrblklenp, unsigned char **addblkp, unsigned int *addblklenp, unsigned char **extrablkp, unsigned int *extrablklenp);
 
+/* step support */
+void *mkdiff_step_setup(int mode);
+void mkdiff_step(void *sdata, unsigned char *old, bsuint oldlen, unsigned char *new, bsuint newlen, struct instr *instr, bsuint *scanp, bsuint *lastposp, bsuint *lastscanp);
+void mkdiff_step_freedata(void *sdata);
+void mkdiff_step_free(void *sdata);
+
+
 #define DELTAMODE_SUF  0
 #define DELTAMODE_HASH 1
 
