@@ -310,8 +310,9 @@ addtocpio_stream(unsigned char *d, int l)
 	    }
 	  else if (!instr.copyout && sd.lastscan == sd.newl)
 	    {
-	      /* no match found in old data, advance... */
-	      sd.lastpos = sd.oldl;
+	      /* no match found in old data, advance if we're behind */
+	      if (sd.lastpos + sd.oldskip < sd.lastscan + sd.newskip)
+	        sd.lastpos = sd.oldl;
 	    }
 	  /* printf("INSTR: %d@%d %d@%d\n", instr.copyout, instr.copyoutoff + sd.oldskip, instr.copyin, instr.copyinoff + sd.newskip); */
 	  if (instr.copyin)
