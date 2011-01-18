@@ -76,7 +76,7 @@ install:
                         PYLIB=`$$PY -c 'from distutils import sysconfig ; print(sysconfig.get_python_lib(1))'` ; \
 			PYVER=`$$PY -c 'from distutils import sysconfig ; print(sysconfig.get_python_version())'` ; \
 			if [ -e python$$PYVER/_deltarpmmodule.so ]; then \
-				mkdir -p $(DESTDIR)$$PYLIB ; \
+				mkdir -p $(DESTDIR)$(pylibprefix)$$PYLIB ; \
 				install -m 755 python$$PYVER/_deltarpmmodule.so $(DESTDIR)$(pylibprefix)$$PYLIB ; \
 				install -m 644 deltarpm.py $(DESTDIR)$(pylibprefix)$$PYLIB ; \
 			fi; \
