@@ -864,6 +864,9 @@ main(int argc, char **argv)
   /* open old rpm */
   /* (if alone == 1,  oldrpm == newrpm) */
   rpmname = argv[argc - 3 + alone];
+  if (verbose >= 2)
+    fprintf(vfp, "Old: %s\n", argv[argc - 3 + alone]);
+
   if (!strcmp(rpmname, "-"))
     fd = 0;
   else if ((fd = open(rpmname, O_RDONLY)) < 0)
@@ -1021,8 +1024,12 @@ main(int argc, char **argv)
     }
   else
     {
+      if (verbose >= 2)
+	fprintf(vfp, "New: %s\n", argv[argc - 2]);
+
       if (verbose)
 	fprintf(vfp, "reading new rpm...\n");
+ 
       rpmname = argv[argc - 2];
       if (!strcmp(rpmname, "-"))
 	nfd = 0;
@@ -1159,7 +1166,12 @@ main(int argc, char **argv)
 	  cpiopos += sizeof(cph);
 	  if (memcmp(cph.magic, "070701", 6))
 	    {
-	      fprintf(stderr, "bad cpio archive\n");
+	      fprintf(stderr, "bad cpio archive in old deltarpm\n");
+		if (verbose >= 2)
+		  {
+		    fprintf(stderr, "cph.magic: %02x%02x %02x%02x %02x%02x\n", cph.magic[0], cph.magic[1], cph.magic[2], cph.magic[3], cph.magic[4], cph.magic[5]);
+		    fprintf(stderr, "Expected: 3037 3037 3031\n");
+		  }
 	      exit(1);
 	    }
 	  size = cpion(cph.filesize);
