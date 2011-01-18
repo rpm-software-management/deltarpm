@@ -11,7 +11,6 @@ CFLAGS = -fPIC -O2 -Wall -g
 CPPFLAGS = -fPIC -DDELTARPM_64BIT -DBSDIFF_NO_SUF -DRPMDUMPHEADER=\"$(rpmdumpheader)\" $(zlibcppflags)
 LDLIBS = -lbz2 $(zlibldflags) -llzma
 LDFLAGS =
-PYTHONVERS = $(shell ls /usr/include/python*/Python.h | sed "s|/usr/include/||g"| sed "s|/Python.h||g")
 
 all: makedeltarpm applydeltarpm rpmdumpheader makedeltaiso applydeltaiso combinedeltarpm fragiso
 
@@ -33,11 +32,16 @@ applydeltaiso: applydeltaiso.o util.o md5.o cfile.o $(zlibbundled)
 fragiso: fragiso.o util.o md5.o rpmhead.o cfile.o $(zlibbundled)
 
 _deltarpmmodule.so: readdeltarpm.o rpmhead.o util.o md5.o cfile.o $(zlibbundled)
-	for ver in $(PYTHONVERS) ; do \
-		if [ ! -f "$$ver/$@" ]; then \
-			mkdir -p $$ver ;\
-			$(CC) $(CFLAGS) -I/usr/include/$$ver $(zlibcppflag) -fPIC -c -o $$ver/deltarpmmodule.o deltarpmmodule.c ;\
-			$(CC) -o $$ver/$@ $$ver/deltarpmmodule.o $^ -shared -Wl,-soname,_deltarpmmodule.so $(LDLIBS); \
+	for PY in python python3 ; do \
+		if [ -x /usr/bin/$$PY-config ] && [ -x /usr/bin/$$PY ]; then \
+			PYVER=`$$PY -c 'from distutils import sysconfig ; print(sysconfig.get_python_version())'`; \
+			PYCFLAGS=`$$PY-config --cflags`; \
+			PYLDFLAGS=`$$PY-config --ldflags`; \
+			if [ ! -f "python$$PYVER/$@" ]; then \
+				mkdir -p python$$PYVER ;\
+				$(CC) $(CFLAGS) $$PYCFLAGS $(zlibcppflag) -fPIC -c -o python$$PYVER/deltarpmmodule.o deltarpmmodule.c ;\
+				$(CC) -o python$$PYVER/$@ python$$PYVER/deltarpmmodule.o $^ -shared -Wl,-soname,_deltarpmmodule.so $(LDLIBS) $$PYLDFLAGS; \
+			fi; \
 		fi; \
 	done
 
@@ -66,11 +70,15 @@ install:
 	install -m 644 makedeltaiso.8 $(DESTDIR)$(mandir)/man8
 	install -m 644 applydeltaiso.8 $(DESTDIR)$(mandir)/man8
 	install -m 644 drpmsync.8 $(DESTDIR)$(mandir)/man8
-	for ver in $(PYTHONVERS) ; do \
-		if [ -e $$ver/_deltarpmmodule.so ]; then \
-			mkdir -p $(DESTDIR)$(libdir)/$$ver/site-packages ; \
-			install -m 755 $$ver/_deltarpmmodule.so $(DESTDIR)$(libdir)/$$ver/site-packages ;\
-			install -m 644 deltarpm.py $(DESTDIR)$(libdir)/$$ver/site-packages ;\
+	for PY in python python3 ; do \
+		if [ -x /usr/bin/$$PY ]; then \
+                        PYLIB=`$$PY -c 'from distutils import sysconfig ; print(sysconfig.get_python_lib(1))'` ; \
+			PYVER=`$$PY -c 'from distutils import sysconfig ; print(sysconfig.get_python_version())'` ; \
+			if [ -e python$$PYVER/_deltarpmmodule.so ]; then \
+				mkdir -p $(DESTDIR)$$PYLIB ; \
+				install -m 755 python$$PYVER/_deltarpmmodule.so $(DESTDIR)$$PYLIB ; \
+				install -m 644 deltarpm.py $(DESTDIR)$$PYLIB ; \
+			fi; \
 		fi; \
 	done
 
