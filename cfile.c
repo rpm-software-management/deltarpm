@@ -888,8 +888,6 @@ crunread_un(struct cfile *f, void *buf, int len)
 }
 
 
-#ifdef Z_RSYNCABLE
-
 int
 cfile_detect_rsync(struct cfile *f)
 {
@@ -919,10 +917,22 @@ cfile_detect_rsync(struct cfile *f)
     }
   for (i = 0; i < 2; i++)
     {
+#ifndef Z_RSYNCABLE
+      /* Rsync friendly zlib not available, don't set up a compressor for it
+       * */
+      if (i)
+	{
+	  break;
+	}
+#endif
       cstrm[i].zalloc = 0;
       cstrm[i].zfree = 0;
       cstrm[i].opaque = 0;
+#ifdef Z_RSYNCABLE
       if (deflateInit2(&cstrm[i], Z_BEST_COMPRESSION, Z_DEFLATED, -MAX_WBITS, 8, Z_DEFAULT_STRATEGY | (i == 1 ? Z_RSYNCABLE : 0)) != Z_OK)
+#else
+      if (deflateInit2(&cstrm[i], Z_BEST_COMPRESSION, Z_DEFLATED, -MAX_WBITS, 8, Z_DEFAULT_STRATEGY) != Z_OK)
+#endif
 	{
 	  if (i)
 	    deflateEnd(&cstrm[0]);
@@ -964,6 +974,23 @@ cfile_detect_rsync(struct cfile *f)
 		{
 		  for (i = 0; i < 2 && !done; i++)
 		    {
+#ifndef Z_RSYNCABLE
+		      /* No rsync friendly zlib so we can only test against
+		       * COMP_GZ.  This is suboptimal as it's only when we
+		       * run into an error that we can cut to the end.  So
+		       * we're forced to uncompress and recompress the whole
+		       * output.  Need to determine if we can determine that
+		       * we used the other algorithm is being used after
+		       * decompressing a certain amount of blocks.  Perhaps
+		       * after RSYNC_WIN or MAX_DIST blocks have been
+		       * decompressed we can know whether COMP_GZ_RSYNC was
+		       * used?
+		       */
+		      if (i)
+			{
+			    break;
+			}
+#endif
 		      cstrm[i].avail_in = sizeof(dbuf) - dstrm.avail_out;
 		      cstrm[i].next_in = dbuf;
 		      while (cstrm[i].avail_in)
@@ -971,14 +998,23 @@ cfile_detect_rsync(struct cfile *f)
 			  cstrm[i].avail_out = sizeof(cbuf);
 			  cstrm[i].next_out = cbuf;
 			  ret = deflate(&cstrm[i], dret == Z_STREAM_END ? Z_FINISH : Z_NO_FLUSH);
+			  /* Any errors in compressing, set to the other
+			   * compression algorithm
+			   */
 			  if (ret != Z_OK && ret != Z_STREAM_END)
 			    {
 			      comp = i ? CFILE_COMP_GZ: CFILE_COMP_GZ_RSYNC;
 			      done = 1;
 			      break;
 			    }
+			  /* if compression yielded something
+			   */
 			  if (cstrm[i].avail_out != sizeof(cbuf))
 			    {
+			      /* If the newly compressed block is not equal to
+			       * the original compressed payload, set to the
+			       * opposite compression algorithm
+			       */
 			      if (memcmp(b + p[i], cbuf, sizeof(cbuf) - cstrm[i].avail_out))
 				{
 				  comp = i ? CFILE_COMP_GZ: CFILE_COMP_GZ_RSYNC;
@@ -987,6 +1023,14 @@ cfile_detect_rsync(struct cfile *f)
 				}
 			      p[i] += sizeof(cbuf) - cstrm[i].avail_out;
 			    }
+			  /* If the input stream is not empty but the
+			   * compressor says that the stream is empty we have
+			   * an error.  Set to the opposite compression
+			   * algorithm.
+			   *
+			   * Note -- This code looks wrong:
+			   * Should be Z_STREAM_END, not BZ_STREAM_END
+			   */
 			  if (cstrm[i].avail_in && ret == BZ_STREAM_END)
 			    {
 			      comp = i ? CFILE_COMP_GZ: CFILE_COMP_GZ_RSYNC;
@@ -1011,7 +1055,9 @@ cfile_detect_rsync(struct cfile *f)
       b = b2;
     }
   deflateEnd(&cstrm[0]);
+#ifdef Z_RSYNCABLE
   deflateEnd(&cstrm[1]);
+#endif
   inflateEnd(&dstrm);
   f->bufN = -1;
   f->strm.gz.avail_in = 0;
@@ -1052,16 +1098,6 @@ cfile_detect_rsync(struct cfile *f)
     free(b);
   return comp == -1 ? -1 : 0;
 }
-
-#else
-
-int
-cfile_detect_rsync(struct cfile *f)
-{
-  return -1;
-}
-
-#endif
 
 /*****************************************************************
  *  our open function
