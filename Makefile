@@ -7,6 +7,7 @@ zlibdir=zlib-1.2.2.f-rsyncable
 zlibbundled=$(zlibdir)/libz.a
 zlibldflags=$(zlibbundled)
 zlibcppflags=-I$(zlibdir)
+pylibprefix=/
 CFLAGS = -fPIC -O2 -Wall -g
 CPPFLAGS = -fPIC -DDELTARPM_64BIT -DBSDIFF_NO_SUF -DRPMDUMPHEADER=\"$(rpmdumpheader)\" $(zlibcppflags)
 LDLIBS = -lbz2 $(zlibldflags) -llzma
@@ -76,8 +77,8 @@ install:
 			PYVER=`$$PY -c 'from distutils import sysconfig ; print(sysconfig.get_python_version())'` ; \
 			if [ -e python$$PYVER/_deltarpmmodule.so ]; then \
 				mkdir -p $(DESTDIR)$$PYLIB ; \
-				install -m 755 python$$PYVER/_deltarpmmodule.so $(DESTDIR)$$PYLIB ; \
-				install -m 644 deltarpm.py $(DESTDIR)$$PYLIB ; \
+				install -m 755 python$$PYVER/_deltarpmmodule.so $(DESTDIR)$(pylibprefix)$$PYLIB ; \
+				install -m 644 deltarpm.py $(DESTDIR)$(pylibprefix)$$PYLIB ; \
 			fi; \
 		fi; \
 	done
