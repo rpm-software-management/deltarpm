@@ -13,6 +13,10 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 
+#if PY_MAJOR_VERSION >= 3
+#define PyString_FromString PyBytes_FromString
+#endif
+
 PyObject *createDict(struct deltarpm d)
 {
   PyObject *dict;
@@ -106,9 +110,30 @@ static PyMethodDef deltarpmMethods[] = {
   { NULL }
 };
 
+#if PY_MAJOR_VERSION >= 3
+static struct PyModuleDef moduledef = {
+    PyModuleDef_HEAD_INIT,
+    "_deltarpm",	/* m_name */
+    NULL,		/* m_doc */
+    0,			/* m_size */
+    deltarpmMethods,	/* m_methods */
+    NULL,		/* m_reload */
+    NULL,		/* m_traverse */
+    NULL,		/* m_clear */
+    NULL		/* m_free */
+};
+    
+PyObject * PyInit__deltarpm(void);
+
+PyObject * PyInit__deltarpm(void)
+{
+    return PyModule_Create(&moduledef);
+}
+#else
 void init_deltarpm(void)
 {
   PyObject *m;
   
   m = Py_InitModule("_deltarpm", deltarpmMethods);
 }
+#endif
