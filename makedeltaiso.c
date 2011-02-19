@@ -280,6 +280,37 @@ put4(FILE *fp, unsigned int d)
 
 void diffit(struct cfile *fpout, FILE *fpold, FILE *fpnew, unsigned char *old, unsigned int oldl, unsigned char *new, int newl, struct rpmpay *newpays, int newpayn, struct rpmpay *oldpays, int oldpayn, MD5_CTX *ctx);
 
+unsigned int payrawread(FILE *fp, off64_t off, unsigned int len, unsigned char **pp)
+{
+  int l, r;
+  struct cfile *cfile;
+
+  if (fseeko64(fp, off, SEEK_SET) != 0)
+    {
+      perror("fseeko");
+      exit(1);
+    }
+  cfile = cfile_open(CFILE_OPEN_RD, CFILE_IO_FILE, fp, CFILE_COMP_UN, len, 0, 0);
+  if (!cfile)
+    {
+      fprintf(stderr, "cfile open failed\n");
+      exit(1);
+    }
+  l = cfile_copy(cfile, cfile_open(CFILE_OPEN_WR, CFILE_IO_ALLOC, pp, CFILE_COMP_UN, CFILE_LEN_UNLIMITED, 0, 0), CFILE_COPY_CLOSE_OUT);
+  if (l == -1)
+    {
+      fprintf(stderr, "cfile_copy failed\n");
+      exit(1);
+    }
+  r = cfile->close(cfile);
+  if (r)
+    {
+      fprintf(stderr, "cfile not used up (%d bytes left)\n", r);
+      exit(1);
+    }
+  return l;
+}
+
 unsigned int payread(FILE *fp, off64_t off, unsigned int len, unsigned char **pp, MD5_CTX *ctx, unsigned char *namebuf)
 {
   int l, r;
@@ -320,7 +351,7 @@ void
 processrpm(struct cfile *fpout, FILE *fpold, FILE *fpnew, struct rpmpay *pay, struct rpmpay *oldpays, int oldpayn, MD5_CTX *ctx)
 {
   struct rpmpay *oldpay;
-  int i, n;
+  int i, n, payrawcmp;
   unsigned int l, newl, oldl;
   unsigned char *new, *old;
   unsigned char namebuf[258];
@@ -381,16 +412,34 @@ processrpm(struct cfile *fpout, FILE *fpold, FILE *fpnew, struct rpmpay *pay, st
 	  fprintf(stderr, "internal error, length mismatch %d %d\n", oldpay->l, oldpays[i].l);
 	  exit(1);
 	}
-      /* payread will fix namebuf[0] */
-      newl = payread(fpnew, pay->o, pay->l, &new, ctx, namebuf);
-      oldl = payread(fpold, oldpay->o, oldpay->l, &old, 0, 0);
-      if (newl == oldl && pay->l == oldpay->l && !memcmp(new, old, newl))
+      /* compare the raw payloads */
+      newl = payrawread(fpnew, pay->o, pay->l, &new);
+      oldl = payrawread(fpold, oldpay->o, oldpay->l, &old);
+      if (newl == oldl && pay->l == oldpay->l)
+	{
+	  payrawcmp = memcmp(new, old, newl);
+	}
+      else
+	{
+	  payrawcmp = 1;
+	}
+      free(old);
+      old = 0;
+      oldl = 0;
+      free(new);
+      new = 0;
+      newl = 0;
+
+      if (!payrawcmp)
 	{
 	  printf("%s: unchanged...", namebuf + 2);
 	  namebuf[0] = 254;
 	}
       else
 	{
+	  /* payread will fix namebuf[0] */
+	  newl = payread(fpnew, pay->o, pay->l, &new, ctx, namebuf);
+	  oldl = payread(fpold, oldpay->o, oldpay->l, &old, 0, 0);
 	  int comp = cfile_setlevel(namebuf[0], pay->level);
 	  printf("%s (%s): creating delta...", namebuf + 2, cfile_comp2str(comp));
 	  namebuf[0] = CFILE_COMPALGO(comp) | (CFILE_COMPLEVEL(comp) << 4);	/* argh! */
@@ -402,15 +451,15 @@ processrpm(struct cfile *fpout, FILE *fpold, FILE *fpnew, struct rpmpay *pay, st
 	  exit(1);
 	}
       bzput4(fpout, n);		/* offset id */
-      if (namebuf[0] == 254)
-        free(old);
-      else
-        diffit(fpout, 0, 0, old, oldl, new, newl, 0, 0, 0, 0, 0);
-      old = 0;
-      oldl = 0;
-      free(new);
-      new = 0;
-      newl = 0;
+      if (namebuf[0] != 254)
+	{
+	  diffit(fpout, 0, 0, old, oldl, new, newl, 0, 0, 0, 0, 0);
+	  old = 0;
+	  oldl = 0;
+	  free(new);
+	  new = 0;
+	  newl = 0;
+	}
     }
   writtensize += fpout->bytes;
   fpout->bytes = 0;
