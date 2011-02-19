@@ -429,6 +429,9 @@ processrpm(struct cfile *fpout, FILE *fpold, FILE *fpnew, struct rpmpay *pay, st
       free(new);
       new = 0;
       newl = 0;
+	
+      /* payread will fix namebuf[0] */
+      newl = payread(fpnew, pay->o, pay->l, &new, ctx, namebuf);
 
       if (!payrawcmp)
 	{
@@ -437,8 +440,6 @@ processrpm(struct cfile *fpout, FILE *fpold, FILE *fpnew, struct rpmpay *pay, st
 	}
       else
 	{
-	  /* payread will fix namebuf[0] */
-	  newl = payread(fpnew, pay->o, pay->l, &new, ctx, namebuf);
 	  oldl = payread(fpold, oldpay->o, oldpay->l, &old, 0, 0);
 	  int comp = cfile_setlevel(namebuf[0], pay->level);
 	  printf("%s (%s): creating delta...", namebuf + 2, cfile_comp2str(comp));
@@ -452,14 +453,12 @@ processrpm(struct cfile *fpout, FILE *fpold, FILE *fpnew, struct rpmpay *pay, st
 	}
       bzput4(fpout, n);		/* offset id */
       if (namebuf[0] != 254)
-	{
-	  diffit(fpout, 0, 0, old, oldl, new, newl, 0, 0, 0, 0, 0);
-	  old = 0;
-	  oldl = 0;
-	  free(new);
-	  new = 0;
-	  newl = 0;
-	}
+        diffit(fpout, 0, 0, old, oldl, new, newl, 0, 0, 0, 0, 0);
+      old = 0;
+      oldl = 0;
+      free(new);
+      new = 0;
+      newl = 0;
     }
   writtensize += fpout->bytes;
   fpout->bytes = 0;
