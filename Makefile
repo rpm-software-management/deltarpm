@@ -18,6 +18,10 @@ all: makedeltarpm applydeltarpm rpmdumpheader makedeltaiso applydeltaiso combine
 
 python: _deltarpmmodule.so
 
+perl:
+	cd perl; perl Makefile.PL
+	@make -C perl
+
 makedeltarpm: makedeltarpm.o writedeltarpm.o md5.o util.o rpml.o rpmhead.o cpio.o delta.o cfile.o $(zlibbundled)
 
 applydeltarpm: applydeltarpm.o readdeltarpm.o md5.o sha256.o util.o rpmhead.o cpio.o cfile.o prelink.o $(zlibbundled)
@@ -84,7 +88,7 @@ install:
 		fi; \
 	done
 
-.PHONY: clean install
+.PHONY: clean install perl
 
 makedeltarpm.o: makedeltarpm.c deltarpm.h util.h md5.h rpmhead.h delta.h cfile.h
 applydeltarpm.o: applydeltarpm.c deltarpm.h util.h md5.h rpmhead.h cpio.h cfile.h prelink.h
