@@ -7,6 +7,7 @@
 
 #define _LARGEFILE64_SOURCE
 
+#include <errno.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -22,12 +23,26 @@
 
 #define BLKSIZE 8192
 
+static void perror_fread(FILE *const fp, char const *const msg)
+{
+  if (ferror(fp))
+    {
+      if (0==errno)
+        errno = EIO;
+      perror(msg);
+    }
+  else
+    {
+      fprintf(stderr, "%s: unexpected end-of-file\n", msg);
+    }
+}
+
 unsigned int get4(FILE *fp)
 {
   unsigned char dd[4];
   if (fread(dd, 4, 1, fp) != 1)
     {
-      perror("fread");
+      perror_fread(fp, "fread");
       exit(1);
     }
   return dd[0] << 24 | dd[1] << 16 | dd[2] << 8 | dd[3];
@@ -57,7 +72,7 @@ filloutdata(FILE *fpold, unsigned char *data, unsigned int *nmp, int nmpn)
 	{
 	  if (fread(dp, nmp[i], 1, fpold) != 1)
 	    {
-	      perror("fread");
+	      perror_fread(fpold, "fread");
 	      exit(1);
 	    }
 	  dp += nmp[i];
@@ -221,7 +236,7 @@ applydelta(FILE *fpold, struct cfile *ocf, struct cfile *cf, unsigned char *outd
   int i;
 
   /* oldl = cget4(cf); already done in called */
-  newl = cget4(cf);
+  newl = cget4(cf);  (void)newl;
   inn = cget4(cf);
   outn = cget4(cf);
   in = xmalloc2(inn, 2 * sizeof(unsigned int));
@@ -367,7 +382,7 @@ int main(int argc, char **argv)
   struct cfile *cf;
   int i;
   unsigned char *outdata;
-  unsigned int outlen, oldl;
+  uint64_t outlen, outspc;
 
   if (argc != 4)
     {
@@ -404,11 +419,40 @@ int main(int argc, char **argv)
   nmp[i] = 0;
 
   outlen = 0;
+  outspc = 0;
   for (i = 0; i < nmpn * 2 + 1; i += 2)
-    outlen += nmp[i];
-  printf("reading %d bytes from old iso...", outlen);
+    {
+      outlen += nmp[i];
+      outspc += nmp[i+1];
+    }
+
+  {
+    unsigned const oldl = cget4(cf);
+    if (oldl != (unsigned)outlen)  /* 4GB wrap */
+      {
+        fprintf(stderr, "diff outlen mismatch: whole=%u pieces=%llu\n",
+          oldl, (unsigned long long)outlen);
+        exit(1);
+      }
+  }
+  { /* Incomplete check that 'old' could have been an input for 'delta'.
+     * Alas: delta did not record isomd5 of old.
+     */
+    off_t const thumb = ftello(fpold);  /* current position */
+    int const rv1 = fseeko(fpold, (off_t)0, SEEK_END);
+    off_t const last = ftello(fpold);  /* .st_size */
+    int const rv2 = fseeko(fpold, thumb, SEEK_SET);  /* restore position */
+    if (0!=rv1 || 0!=rv2 || last < (outlen + outspc))
+      {
+        fprintf(stderr, "%s: too short: %llu vs %llu\n",
+          argv[1], (unsigned long long)last,
+                   (unsigned long long)(outlen + outspc));
+        exit(1);
+      }
+  }
+  printf("reading %llu bytes from old iso...", (unsigned long long)outlen);
   fflush(stdout);
-  outdata = xmalloc(outlen);
+  outdata = xmalloc((unsigned)outlen);
   filloutdata(fpold, outdata, nmp, nmpn);
   printf("done\n");
 
@@ -423,13 +467,7 @@ int main(int argc, char **argv)
       fprintf(stderr, "cfile open iso failed\n");
       exit(1);
     }
-  oldl = cget4(cf);
-  if (oldl != outlen)
-    {
-      fprintf(stderr, "diff outlen mismatch: %d %d\n", oldl, outlen);
-      exit(1);
-    }
-  applydelta(fpold, cfnew, cf, outdata, outlen, nmp, nmpn);
+  applydelta(fpold, cfnew, cf, outdata, (unsigned)outlen, nmp, nmpn);
   if (cfnew->close(cfnew) == -1)
     {
       fprintf(stderr, "cfile close iso failed\n");
