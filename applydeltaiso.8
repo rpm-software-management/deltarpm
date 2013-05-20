@@ -1,7 +1,7 @@
 .\" man page for applydeltaiso
 .\" Copyright (c) 2005 Michael Schroeder <mls@suse.de>
 .\" See LICENSE.BSD for license
-.TH APPLYDELTAISO 2 "Jul 2009"
+.TH APPLYDELTAISO 8 "Jul 2009"
 .SH NAME
 applydeltaiso \- reconstruct an iso from the old iso and the deltaiso
 
@@ -16,6 +16,10 @@ applydeltaiso applies a deltaiso to
 .I oldiso
 to re-create
 .IR newiso .
+
+When specifying
+.IR oldiso ,
+you can specify a device (such as /dev/dvd).
 
 .SH SEE ALSO
 .BR makedeltaiso (8)
