@@ -70,6 +70,7 @@ install:
 	install -m 644 combinedeltarpm.8 $(DESTDIR)$(mandir)/man8
 	install -m 644 makedeltaiso.8 $(DESTDIR)$(mandir)/man8
 	install -m 644 applydeltaiso.8 $(DESTDIR)$(mandir)/man8
+	install -m 644 fragiso.8 $(DESTDIR)$(mandir)/man8
 	install -m 644 drpmsync.8 $(DESTDIR)$(mandir)/man8
 	for PY in python python3 ; do \
 		if [ -x /usr/bin/$$PY ]; then \
