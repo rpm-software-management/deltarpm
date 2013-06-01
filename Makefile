@@ -38,11 +38,10 @@ _deltarpmmodule.so: readdeltarpm.o rpmhead.o util.o md5.o cfile.o $(zlibbundled)
 		if [ -x /usr/bin/$$PY-config ] && [ -x /usr/bin/$$PY ]; then \
 			PYVER=`$$PY -c 'from distutils import sysconfig ; print(sysconfig.get_python_version())'`; \
 			PYCFLAGS=`$$PY-config --cflags`; \
-			PYLDFLAGS=`$$PY-config --ldflags`; \
 			if [ ! -f "python$$PYVER/$@" ]; then \
 				mkdir -p python$$PYVER ;\
 				$(CC) $(CFLAGS) $$PYCFLAGS $(zlibcppflag) -fPIC -c -o python$$PYVER/deltarpmmodule.o deltarpmmodule.c ;\
-				$(CC) -o python$$PYVER/$@ python$$PYVER/deltarpmmodule.o $^ -shared -Wl,-soname,_deltarpmmodule.so $(LDLIBS) $$PYLDFLAGS; \
+				$(CC) $(LDFLAGS) -o python$$PYVER/$@ python$$PYVER/deltarpmmodule.o $^ -shared -Wl,-soname,_deltarpmmodule.so $(LDLIBS); \
 			fi; \
 		fi; \
 	done
