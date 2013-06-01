@@ -12,6 +12,7 @@ CFLAGS = -fPIC -O2 -Wall -g
 CPPFLAGS = -fPIC -DDELTARPM_64BIT -DBSDIFF_NO_SUF -DRPMDUMPHEADER=\"$(rpmdumpheader)\" $(zlibcppflags)
 LDLIBS = -lbz2 $(zlibldflags) -llzma
 LDFLAGS =
+PYTHONS = python python3
 
 all: makedeltarpm applydeltarpm rpmdumpheader makedeltaiso applydeltaiso combinedeltarpm fragiso
 
@@ -33,7 +34,7 @@ applydeltaiso: applydeltaiso.o util.o md5.o cfile.o $(zlibbundled)
 fragiso: fragiso.o util.o md5.o rpmhead.o cfile.o $(zlibbundled)
 
 _deltarpmmodule.so: readdeltarpm.o rpmhead.o util.o md5.o cfile.o $(zlibbundled)
-	for PY in python python3 ; do \
+	for PY in $(PYTHONS) ; do \
 		if [ -x /usr/bin/$$PY-config ] && [ -x /usr/bin/$$PY ]; then \
 			PYVER=`$$PY -c 'from distutils import sysconfig ; print(sysconfig.get_python_version())'`; \
 			PYCFLAGS=`$$PY-config --cflags`; \
@@ -72,7 +73,7 @@ install:
 	install -m 644 applydeltaiso.8 $(DESTDIR)$(mandir)/man8
 	install -m 644 fragiso.8 $(DESTDIR)$(mandir)/man8
 	install -m 644 drpmsync.8 $(DESTDIR)$(mandir)/man8
-	for PY in python python3 ; do \
+	for PY in $(PYTHONS) ; do \
 		if [ -x /usr/bin/$$PY ]; then \
                         PYLIB=`$$PY -c 'from distutils import sysconfig ; print(sysconfig.get_python_lib(1))'` ; \
 			PYVER=`$$PY -c 'from distutils import sysconfig ; print(sysconfig.get_python_version())'` ; \
