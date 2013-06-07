@@ -631,7 +631,7 @@ cwopen_gz(struct cfile *f)
   f->buf[2] = Z_DEFLATED;
   f->buf[3] = 0;
   f->buf[4] = f->buf[5] = f->buf[6] = f->buf[7] = 0;
-  f->buf[8] = 0;
+  f->buf[8] = f->level == 9 ? 2 : 0;
   f->buf[9] = 3;	/* OS_UNIX */
   if (cfile_writebuf(f, f->buf, 10) != 10)
     {
