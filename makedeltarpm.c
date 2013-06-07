@@ -1176,7 +1176,7 @@ main(int argc, char **argv)
 	    }
 	  size = cpion(cph.filesize);
 	  nsize = cpion(cph.namesize);
-	  nlink = cpion(cph.nlink);
+	  nlink = cpion(cph.nlink); (void)nlink;
 	  nsize += (4 - ((nsize + 2) & 3)) & 3;
 	  if (nsize > namebufl)
 	    {

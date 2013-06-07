@@ -27,7 +27,7 @@ static void perror_fread(FILE *const fp, char const *const msg)
 {
   if (ferror(fp))
     {
-      if (0==errno)
+      if (!errno)
         errno = EIO;
       perror(msg);
     }
@@ -442,7 +442,7 @@ int main(int argc, char **argv)
     int const rv1 = fseeko(fpold, (off_t)0, SEEK_END);
     off_t const last = ftello(fpold);  /* .st_size */
     int const rv2 = fseeko(fpold, thumb, SEEK_SET);  /* restore position */
-    if (0!=rv1 || 0!=rv2 || last < (outlen + outspc))
+    if (rv1 != 0 || rv2 != 0 || last < (outlen + outspc))
       {
         fprintf(stderr, "%s: too short: %llu vs %llu\n",
           argv[1], (unsigned long long)last,
