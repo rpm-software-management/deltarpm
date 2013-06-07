@@ -1,7 +1,14 @@
 
+ What's new in deltarpm-3.6
+----------------------------
+- support for xz payloads
+- new -m option for makedeltarpm to limit the amount of needed memory
+- python module to inspect delta rpms (done by RedHat)
+
  What's new in deltarpm-3.5
 ----------------------------
 - support for sha256 file digests
+- support for lzma payloads
 
  What's new in deltarpm-3.4
 ----------------------------
