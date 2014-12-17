@@ -2686,6 +2686,7 @@ sub opensock {
   return if $sock_isopen;
   my $tcpproto = getprotobyname('tcp');
   socket(S, PF_INET, SOCK_STREAM, $tcpproto) || die("socket: $!\n");
+  setsockopt(S, SOL_SOCKET, SO_KEEPALIVE, pack("l",1)) || die("setsockopt: $!\n"); 
   connect(S, sockaddr_in($syncport, $syncaddr)) || die("connect: $!\n");
   $sock_isopen = 1;
 }
@@ -2974,7 +2975,8 @@ sub drpmsync_get_update {
   } elsif ($type eq 'FISO') {
     $ans = copytofile(*S, "$tmpnam.fiso", $ans, $anssize, $ctx);
     $ans = finishreq(*S, $ans, $ctx, $id);
-    return 'FISO', [ $tmpnam, undef, substr($extra, 0, 12) ];
+    $d = [ $tmpnam, undef, substr($extra, 0, 12) ];
+    return ('FISO', $d);
   } elsif ($type eq 'RPM ') {
     $sabytes -= $anssize;
     my $delta;
@@ -2982,36 +2984,49 @@ sub drpmsync_get_update {
     die("nothing to do?\n") if $nrpm == 0 && $ndrpm == 0;
     my @deltas;
     my $dextra = substr($extra, 12 + 16);
+    my @renames;
     while ($ndrpm > 0) {
       $delta = $tmpnam;
       $delta =~ s/[^\/]*$//;
       $delta .= substr($dextra, 12, 32 * 3);
-      # end old job if we have a delta conflict
-      checkjob() if $runningjob && -e $delta;
       my $size = hex(substr($dextra, 12 + 3 * 32, 8));
       die("delta rpm bigger than answer? $size > $anssize\n") if $size > $anssize;
+      push @deltas, $delta;
+      # conflict with running job?
+      if ($runningjob && -e $delta) {
+	push @renames, $delta;
+	$delta .= ".tmp";
+      }
       $ans = copytofile(*S, $delta, $ans, $size, $ctx);
       $anssize -= $size;
       fixmodetime($delta, substr($dextra, 0, 12));
       $dextra = substr($dextra, 12 + 32 * 3 + 8);
-      push @deltas, $delta;
       $ndrpm--;
     }
-    if ($nrpm == 1) {
+    if ($nrpm) {
       $ans = copytofile_seek(*S, $tmpnam, $extractoff, $ans, $anssize, $ctx);
-      $ans = finishreq(*S, $ans, $ctx, $id);
-      return 'RPM ', [ $dto->[0] ], @deltas if $rextract;
+    } else {
+      die("junk at end of answer\n") if $anssize;
+    }
+    $ans = finishreq(*S, $ans, $ctx, $id);
+    if (@renames) {
+      checkjob();
+      for (@renames) {
+        rename("$_.tmp", $_) || die("rename $_.tmp $_: $!\n");
+      }
+    }
+    if (!$nrpm) {
+      $d = [ undef, undef, substr($extra, 0, 12) ];
+    } elsif ($rextract) {
+      $d = [ $dto->[0] ];
+    } else {
       fixmodetime($tmpnam, substr($extra, 0, 12));
       my @s = stat($tmpnam);
       die("$tmpnam: $!\n") unless @s;
       $sabytes += $s[7];
       $d = [ $dto->[0], "$s[9]/$s[7]/$s[1]", sprintf("1%03x%08x", ($s[2] & 07777), $s[9]), rpminfo($tmpnam) ];
-    } else {
-      die("junk at end of answer\n") if $anssize;
-      $ans = finishreq(*S, $ans, $ctx, $id);
-      $d = [ undef, undef, substr($extra, 0, 12) ];
     }
-    return 'RPM ', $d, @deltas;
+    return ('RPM ', $d, @deltas);
   } else {
     die("received strange answer type: $type\n");
   }
