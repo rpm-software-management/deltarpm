@@ -130,7 +130,7 @@ prelinked_open(char *name)
   if (stat("/usr/sbin/prelink", &stb))
     {
       perror("/usr/sbin/prelink");
-      fprintf(stderr, "prelink not installed, cannot undo prelinking");
+      fprintf(stderr, "prelink not installed, cannot undo prelinking\n");
       exit(1);
     }
   strcpy(template, "/tmp/deltarpm.XXXXXX");
