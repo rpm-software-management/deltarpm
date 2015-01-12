@@ -366,7 +366,7 @@ scannext:
 	    {
 	      if (memcmp(new + scan + HSIZE *3, old + pos2 - 1, HSIZE))
 		{
-		  ssx2 = (ssx2 == prime) ? 0 : ssx2 + 1;
+		  ssx2 = (ssx2 == prime - 1) ? 0 : ssx2 + 1;
 		  pos2 = hash[ssx2];
 		}
 	    }
