@@ -46,6 +46,11 @@ PyObject *createDict(struct deltarpm d)
   if (d.seq) {
     char *tmp = calloc(d.seql * 2 + 1, sizeof(char));
     int i;
+
+    if(tmp == NULL) {
+      PyErr_SetFromErrno(PyExc_SystemError);
+      return NULL;
+    }
     for (i = 0; i < d.seql; i++) {
       char buf[3];
       
@@ -54,6 +59,10 @@ PyObject *createDict(struct deltarpm d)
     }
     o = PyString_FromString(tmp);
     free(tmp);
+    if(o == NULL) {
+      PyErr_SetFromErrno(PyExc_SystemError);
+      return NULL;
+    }
     PyDict_SetItemString(dict, "seq", o);
     Py_DECREF(o);
   } else {
