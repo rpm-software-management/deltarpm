@@ -122,6 +122,7 @@ processrpm(FILE *fpold, struct cfile *ocf, struct cfile *cf, unsigned int *nmp, 
       unsigned char buf[8192];
 
       printf("%s: verbatim copy\n", namebuf);
+      fflush(stdout);
       len = cget4(cf);
       while (len)
 	{
@@ -141,9 +142,15 @@ processrpm(FILE *fpold, struct cfile *ocf, struct cfile *cf, unsigned int *nmp, 
       return;
     }
   if (ctype == 254)
-    printf("%s: copying unchanged payload\n", namebuf);
+    {
+      printf("%s: copying unchanged payload\n", namebuf);
+      fflush(stdout);
+    }
   else
-    printf("%s (%s): applying delta\n", namebuf, cfile_comp2str(ctype));
+    {
+      printf("%s (%s): applying delta\n", namebuf, cfile_comp2str(ctype));
+      fflush(stdout);
+    }
   rpmn = cget4(cf);
   if (rpmn < 0 || rpmn >= nmpn)
     {
