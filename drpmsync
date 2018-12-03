@@ -3452,6 +3452,7 @@ my $cmdline_get_filelist;
 my $cmdline_use_filelist;
 my $cmdline_norecurse;
 my $cmdline_list;
+my $cmdline_no_delete;
 my @cmdline_filter;
 my @cmdline_filter_arch;
 
@@ -3564,6 +3565,27 @@ sub filelist_from_file {
   filelist_apply_filter_arch($flp);
 }
 
+sub usage {
+  print "Usage: drpmsync [-c config_file]\n";
+  print "                [--repo repository] Path to cache repository\n";
+  print "                [--repo-add] add files to cache\n";
+  print "                [--repo-validate] check files in cache\n";
+  print "                [--norecurse-validate] without recursion\n";
+  print "                [--list] non recursive list files only\n";
+  print "                [--list-recursive] recursive list files only\n";
+  print "                [--get-filelist DIR] retrieve filelist for DIR\n";
+  print "                [--filelist-synctree DIR]\n";
+  print "                [--use-filelist DIR]\n";
+  print "                [--exclude regexp]\n";
+  print "                [--include regexp]\n";
+  print "                [--exclude-arch regexp]\n";
+  print "                [--include-arch regexp]\n";
+  print "                [--no-delete] do not delete files not present on the other side\n";
+  print "                              by default files not present are removed\n";
+  print "                [--help] this message\n";
+  print "\n";
+}
+
 while (@ARGV) {
   last if $ARGV[0] !~ /^-/;
   my $opt = shift @ARGV;
@@ -3606,7 +3628,13 @@ while (@ARGV) {
   } elsif ($opt eq '--include-arch') {
     die("--include-arch: argument required\n") unless @ARGV;
     push @cmdline_filter_arch, '+'.shift(@ARGV);
+  } elsif ($opt eq '--no-delete') {
+    $cmdline_no_delete = 1;
+  } elsif ($opt eq '--help') {
+    usage();
+    exit(0);
   } else {
+    usage();
     die("$opt: unknown option\n");
   }
 }
@@ -3912,17 +3940,19 @@ checkjob() if $runningjob;
 send_fin();
 
 # part 5
-@files = sort {$a->[0] cmp $b->[0]} values %files;
-for my $file (grep {!$syncfiles{$_->[0]}} reverse @files) {
-  recvlog_print("- $file->[0]");
-  if ($file->[2] =~ /^0/) {
-    rmdir("$basedir/$file->[0]") || die("rmdir $basedir/$file->[0]: $!\n");
-  } else {
-    unlink("$basedir/$file->[0]") || die("unlink $basedir/$file->[0]: $!\n");
-    repo_del("$basedir/$file->[0]", $file) if $config_repo;
+if (!$cmdline_no_delete) {
+  @files = sort {$a->[0] cmp $b->[0]} values %files;
+  for my $file (grep {!$syncfiles{$_->[0]}} reverse @files) {
+    recvlog_print("- $file->[0]");
+    if ($file->[2] =~ /^0/) {
+      rmdir("$basedir/$file->[0]") || die("rmdir $basedir/$file->[0]: $!\n");
+    } else {
+      unlink("$basedir/$file->[0]") || die("unlink $basedir/$file->[0]: $!\n");
+      repo_del("$basedir/$file->[0]", $file) if $config_repo;
+    }
+    dirchanged($file->[0]);
+    delete $files{$file->[0]};
   }
-  dirchanged($file->[0]);
-  delete $files{$file->[0]};
 }
 
 # part 6
