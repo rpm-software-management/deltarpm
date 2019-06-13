@@ -1295,6 +1295,8 @@ main(int argc, char **argv)
     addblkcomp = CFILE_COMP_LZMA;
   else if (d.addblklen > 6 && (d.addblk[0] == 0xfd && d.addblk[1] == '7' && d.addblk[2] == 'z' && d.addblk[3] == 'X' && d.addblk[4] == 'Z'))
     addblkcomp = CFILE_COMP_XZ;
+  else if (d.addblklen > 4 && (d.addblk[0] & 0xf0) == 0x20 &&d.addblk[1] == 0xb5 && d.addblk[2] == 0x2f && d.addblk[3] == 0xfd)
+    addblkcomp = CFILE_COMP_ZSTD;
   if (info)
     {
       unsigned int *size;

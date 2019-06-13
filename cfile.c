@@ -11,10 +11,6 @@
 #include <stdint.h>
 #include <unistd.h>
 
-#include <zlib.h>
-#include <bzlib.h>
-#include <lzma.h>
-
 #include "cfile.h"
 
 /*****************************************************************
@@ -818,6 +814,162 @@ crunread_lz(struct cfile *f, void *buf, int len)
   return cfile_unreadbuf(f, buf, len, 0);
 }
 
+#ifdef WITH_ZSTD
+/*****************************************************************
+ *  zstd io
+ */
+
+static struct cfile *
+cropen_zstd(struct cfile *f)
+{
+  f->strm.zstd_d = ZSTD_createDStream();
+  if (ZSTD_isError(ZSTD_initDStream(f->strm.zstd_d)))
+    {
+      free(f);
+      return 0;
+    }
+  f->zstd_in.src = f->buf;
+  f->zstd_in.pos = 0;
+  f->zstd_in.size = f->bufN == -1 ? 0 : f->bufN;
+  f->eof = 0;
+  return f;
+}
+
+static int
+crread_zstd(struct cfile *f, void *buf, int len)
+{
+  int used, eof = 0;
+  size_t ret = 0;
+  if (f->eof)
+    return 0;
+  f->zstd_out.size = len;
+  f->zstd_out.dst = buf;
+  f->zstd_out.pos = 0;
+  for (;;)
+    {
+      if (!eof && f->zstd_in.pos == f->zstd_in.size && f->bufN)
+	{
+	  if (cfile_readbuf(f, f->buf, sizeof(f->buf)) == -1)
+	    return -1;
+	  f->zstd_in.pos = 0;
+	  f->zstd_in.size = f->bufN;
+	  if (!f->bufN)
+	    eof = 1;
+	}
+      used = f->zstd_in.pos;
+      if (ret || !eof)
+	ret = ZSTD_decompressStream(f->strm.zstd_d, &f->zstd_out, &f->zstd_in);
+      used = f->zstd_in.pos - used;
+      if (used && f->ctxup)
+	f->ctxup(f->ctx, (unsigned char *)(f->zstd_in.src + f->zstd_in.pos - used), used);
+      f->bytes += used;
+      if (ret == 0 && eof)
+	{
+	  f->eof = 1;
+	  return f->zstd_out.pos;
+	}
+      if (ZSTD_isError(ret))
+	return -1;
+      if (f->zstd_out.pos == len)
+	return len;
+    }
+}
+
+static int
+crclose_zstd(struct cfile *f)
+{
+  int r;
+  ZSTD_freeDStream(f->strm.zstd_d);
+  if (f->fd == CFILE_IO_CFILE && f->zstd_in.pos < f->zstd_in.size)
+    {
+      struct cfile *cf = (struct cfile *)f->fp;
+      if (cf->unread(cf, (void *)f->zstd_in.src + f->zstd_in.pos, f->zstd_in.size - f->zstd_in.pos) != -1)
+        f->zstd_in.pos = f->zstd_in.size;
+    }
+  r = (f->len != CFILE_LEN_UNLIMITED ? f->len : 0) + (f->zstd_in.size - f->zstd_in.pos);
+  if (f->unreadbuf != f->buf)
+    free(f->unreadbuf);
+  free(f);
+  return r;
+}
+
+static struct cfile *
+cwopen_zstd(struct cfile *f)
+{
+  f->strm.zstd_c = ZSTD_createCStream();
+  if (!f->strm.zstd_c)
+    {
+      free(f);
+      return 0;
+    }
+  if (!f->level)
+    f->level = 3;
+  if (ZSTD_isError(ZSTD_initCStream(f->strm.zstd_c, f->level)))
+    {
+      ZSTD_freeCStream(f->strm.zstd_c);
+      free(f);
+      return 0;
+    }
+  f->zstd_out.dst = f->buf;
+  f->zstd_out.pos = 0;
+  f->zstd_out.size = sizeof(f->buf);
+  return f;
+}
+
+static int
+cwclose_zstd(struct cfile *f)
+{
+  int bytes;
+  for (;;)
+    {
+      size_t ret;
+      f->zstd_out.pos = 0;
+      ret = ZSTD_endStream(f->strm.zstd_c, &f->zstd_out);
+      if (ZSTD_isError(ret))
+        return -1;
+      if (f->zstd_out.pos && cfile_writebuf(f, f->buf, f->zstd_out.pos) != f->zstd_out.pos)
+        return -1;
+      if (ret == 0)
+	break;
+    }
+  ZSTD_freeCStream(f->strm.zstd_c);
+  if (f->fd == CFILE_IO_ALLOC)
+    cwclose_fixupalloc(f);
+  bytes = f->bytes;
+  free(f);
+  return bytes;
+}
+
+static int
+cwwrite_zstd(struct cfile *f, void *buf, int len)
+{
+  if (len <= 0)
+    return len < 0 ? -1 : 0;
+  f->zstd_in.src = buf;
+  f->zstd_in.pos = 0;
+  f->zstd_in.size = len;
+  for (;;)
+    {
+      size_t ret;
+      f->zstd_out.pos = 0;
+      ret = ZSTD_compressStream(f->strm.zstd_c, &f->zstd_out, &f->zstd_in);
+      if (ZSTD_isError(ret))
+	return -1;
+      if (f->zstd_out.pos)
+	if (cfile_writebuf(f, f->buf, f->zstd_out.pos) != f->zstd_out.pos)
+	  return -1;
+      if (f->zstd_in.pos == len)
+        return len;
+    }
+}
+
+static int
+crunread_zstd(struct cfile *f, void *buf, int len)
+{
+  return cfile_unreadbuf(f, buf, len, 0);
+}
+#endif
+
 /*****************************************************************
  *  uncompressed io
  */
@@ -1118,7 +1270,7 @@ cfile_open(int mode, int fd, void *fp, int comp, size_t len, void (*ctxup)(void 
       fp = f->fp;
     }
   else
-    f = malloc(sizeof(*f));
+    f = calloc(1, sizeof(*f));
   if (!f)
     return 0;
   f->fd = fd;
@@ -1157,6 +1309,8 @@ cfile_open(int mode, int fd, void *fp, int comp, size_t len, void (*ctxup)(void 
 	    comp = CFILE_COMP_LZMA;
 	  else if (f->buf[0] == 0xfd && f->buf[1] == '7' && f->buf[2] == 'z' && f->buf[3] == 'X' && f->buf[4] == 'Z')
 	    comp = CFILE_COMP_XZ;
+	  else if ((f->buf[0] & 0xf0) == 0x20 && f->buf[1] == 0xb5 && f->buf[2] == 0x2f && f->buf[3] == 0xfd)
+	    comp = CFILE_COMP_ZSTD;
 	}
     }
   f->comp = CFILE_COMPALGO(comp);
@@ -1204,6 +1358,14 @@ cfile_open(int mode, int fd, void *fp, int comp, size_t len, void (*ctxup)(void 
       f->write  = mode == CFILE_OPEN_WR ? cwwrite_lz : 0;
       f->close  = mode == CFILE_OPEN_RD ? crclose_lz : cwclose_lz;
       return mode == CFILE_OPEN_RD ? cropen_lz(f) : cwopen_xz(f);
+#ifdef WITH_ZSTD
+    case CFILE_COMP_ZSTD:
+      f->read   = mode == CFILE_OPEN_RD ? crread_zstd : 0;
+      f->unread = mode == CFILE_OPEN_RD ? crunread_zstd : 0;
+      f->write  = mode == CFILE_OPEN_WR ? cwwrite_zstd : 0;
+      f->close  = mode == CFILE_OPEN_RD ? crclose_zstd : cwclose_zstd;
+      return mode == CFILE_OPEN_RD ? cropen_zstd(f) : cwopen_zstd(f);
+#endif
     default:
       free(f);
       return 0;
@@ -1269,6 +1431,8 @@ cfile_comp2str(int comp)
       return "lzma";
     case CFILE_COMP_XZ:
       return "xz";
+    case CFILE_COMP_ZSTD:
+      return "zstd";
     }
   return "???";
 }

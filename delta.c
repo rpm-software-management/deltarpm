@@ -429,7 +429,7 @@ gotit:
 	    {
 	      if ((scsc+lastoffset<oldlen) && (old[scsc+lastoffset] == new[scsc]))
 		oldscore++;
-		oldscorenum++;
+	      oldscorenum++;
 	    }
 	}
       if (len - oldscore >= 32)

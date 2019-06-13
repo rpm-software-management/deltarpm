@@ -8,6 +8,9 @@
 #include <zlib.h>
 #include <bzlib.h>
 #include <lzma.h>
+#ifdef WITH_ZSTD
+#include <zstd.h>
+#endif
 
 struct cfile {
   int fd;
@@ -29,7 +32,15 @@ struct cfile {
     bz_stream bz;
     z_stream gz;
     lzma_stream lz;
+#ifdef WITH_ZSTD
+    ZSTD_CStream *zstd_c;
+    ZSTD_DStream *zstd_d;
+#endif
   } strm;
+#ifdef WITH_ZSTD
+  ZSTD_inBuffer zstd_in;
+  ZSTD_outBuffer zstd_out;
+#endif
   int (*read)(struct cfile *f, void *buf, int len);
   int (*write)(struct cfile *f, void *buf, int len);
   int (*close)(struct cfile *f);
@@ -56,6 +67,7 @@ typedef void (*cfile_ctxup)(void *, unsigned char *, unsigned int);
 #define CFILE_COMP_BZ_17 (4)
 #define CFILE_COMP_LZMA (5)
 #define CFILE_COMP_XZ (6)
+#define CFILE_COMP_ZSTD (7)
 
 #define CFILE_COMP_BZ CFILE_COMP_BZ_20
 

@@ -327,7 +327,7 @@ rpmoffs(FILE *fp, char *isoname, struct rpmpay **retp)
 	  level = 0;
 	  payloadflags = headstring(h, TAG_PAYLOADFLAGS);
 	  if (payloadflags && *payloadflags >= '1' && *payloadflags <= '9')
-	    level = *payloadflags - '0';
+	    level = atoi(payloadflags);
 
 	  free(h);
 

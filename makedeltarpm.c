@@ -575,6 +575,8 @@ str2comp(char *comp)
     return CFILE_COMP_LZMA;
   if (!strcmp(comp, "xz"))
     return CFILE_COMP_XZ;
+  if (!strcmp(comp, "zstd"))
+    return CFILE_COMP_ZSTD;
   if (!strcmp(comp, "uncompressed"))
     return CFILE_COMP_UN;
   fprintf(stderr, "unknown compression type: %s\n", comp);
@@ -1088,7 +1090,7 @@ main(int argc, char **argv)
   targetcomp = newbz->comp;
   if ((payloadflags = headstring(d.h, TAG_PAYLOADFLAGS)) != 0)
     if (*payloadflags >= '1' && *payloadflags <= '9')
-      targetcomp = cfile_setlevel(targetcomp, *payloadflags - '0');
+      targetcomp = cfile_setlevel(targetcomp, atoi(payloadflags));
   if (paycomp == CFILE_COMP_XX)
     paycomp = targetcomp;
   if (addblkcomp == CFILE_COMP_XX)
