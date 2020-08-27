@@ -896,7 +896,7 @@ crclose_zstd(struct cfile *f)
 static struct cfile *
 cwopen_zstd(struct cfile *f)
 {
-  f->strm.zstd_c = ZSTD_createCStream();
+  f->strm.zstd_c = ZSTD_createCCtx();
   if (!f->strm.zstd_c)
     {
       free(f);
@@ -904,11 +904,21 @@ cwopen_zstd(struct cfile *f)
     }
   if (!f->level)
     f->level = 3;
-  if (ZSTD_isError(ZSTD_initCStream(f->strm.zstd_c, f->level)))
+  if (ZSTD_isError(ZSTD_CCtx_setParameter(f->strm.zstd_c, ZSTD_c_compressionLevel, f->level)))
     {
-      ZSTD_freeCStream(f->strm.zstd_c);
+      ZSTD_freeCCtx(f->strm.zstd_c);
       free(f);
       return 0;
+    }
+  if (f->comp == CFILE_COMP_ZSTD_THREADED)
+    {
+      /* always use 16 threads */
+      if (ZSTD_isError(ZSTD_CCtx_setParameter(f->strm.zstd_c, ZSTD_c_nbWorkers, 16)))
+	{
+	  ZSTD_freeCCtx(f->strm.zstd_c);
+	  free(f);
+	  return 0;
+	}
     }
   f->zstd_out.dst = f->buf;
   f->zstd_out.pos = 0;
@@ -920,11 +930,14 @@ static int
 cwclose_zstd(struct cfile *f)
 {
   int bytes;
+  f->zstd_in.src = 0;
+  f->zstd_in.pos = 0;
+  f->zstd_in.size = 0;
   for (;;)
     {
       size_t ret;
       f->zstd_out.pos = 0;
-      ret = ZSTD_endStream(f->strm.zstd_c, &f->zstd_out);
+      ret = ZSTD_compressStream2(f->strm.zstd_c, &f->zstd_out, &f->zstd_in, ZSTD_e_end);
       if (ZSTD_isError(ret))
         return -1;
       if (f->zstd_out.pos && cfile_writebuf(f, f->buf, f->zstd_out.pos) != f->zstd_out.pos)
@@ -932,7 +945,7 @@ cwclose_zstd(struct cfile *f)
       if (ret == 0)
 	break;
     }
-  ZSTD_freeCStream(f->strm.zstd_c);
+  ZSTD_freeCCtx(f->strm.zstd_c);
   if (f->fd == CFILE_IO_ALLOC)
     cwclose_fixupalloc(f);
   bytes = f->bytes;
@@ -952,7 +965,7 @@ cwwrite_zstd(struct cfile *f, void *buf, int len)
     {
       size_t ret;
       f->zstd_out.pos = 0;
-      ret = ZSTD_compressStream(f->strm.zstd_c, &f->zstd_out, &f->zstd_in);
+      ret = ZSTD_compressStream2(f->strm.zstd_c, &f->zstd_out, &f->zstd_in, ZSTD_e_continue);
       if (ZSTD_isError(ret))
 	return -1;
       if (f->zstd_out.pos)
@@ -1360,6 +1373,7 @@ cfile_open(int mode, int fd, void *fp, int comp, size_t len, void (*ctxup)(void 
       return mode == CFILE_OPEN_RD ? cropen_lz(f) : cwopen_xz(f);
 #ifdef WITH_ZSTD
     case CFILE_COMP_ZSTD:
+    case CFILE_COMP_ZSTD_THREADED:
       f->read   = mode == CFILE_OPEN_RD ? crread_zstd : 0;
       f->unread = mode == CFILE_OPEN_RD ? crunread_zstd : 0;
       f->write  = mode == CFILE_OPEN_WR ? cwwrite_zstd : 0;
@@ -1433,6 +1447,8 @@ cfile_comp2str(int comp)
       return "xz";
     case CFILE_COMP_ZSTD:
       return "zstd";
+    case CFILE_COMP_ZSTD_THREADED:
+      return "zstd threaded";
     }
   return "???";
 }

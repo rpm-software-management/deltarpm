@@ -33,7 +33,7 @@ struct cfile {
     z_stream gz;
     lzma_stream lz;
 #ifdef WITH_ZSTD
-    ZSTD_CStream *zstd_c;
+    ZSTD_CCtx *zstd_c;
     ZSTD_DStream *zstd_d;
 #endif
   } strm;
@@ -68,6 +68,7 @@ typedef void (*cfile_ctxup)(void *, unsigned char *, unsigned int);
 #define CFILE_COMP_LZMA (5)
 #define CFILE_COMP_XZ (6)
 #define CFILE_COMP_ZSTD (7)
+#define CFILE_COMP_ZSTD_THREADED (8)
 
 #define CFILE_COMP_BZ CFILE_COMP_BZ_20
 

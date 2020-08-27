@@ -170,7 +170,7 @@ writedeltarpm(struct deltarpm *d, unsigned char **indatalist)
     }
   if ((bfd = cfile_open(CFILE_OPEN_WR, fd, 0, d->deltacomp, CFILE_LEN_UNLIMITED, (cfile_ctxup)rpmMD5Update, &paymd5)) == 0)
     {
-      fprintf(stderr, "payload open failed\n");
+      fprintf(stderr, "payload write open failed\n");
       exit(1);
     }
   write32(bfd, d->version);
