@@ -131,8 +131,14 @@ cfile_writebuf(struct cfile *f, unsigned char *buf, int len)
     return -1;
   if (f->len != CFILE_LEN_UNLIMITED)
     f->len -= len;
-  if (len && f->ctxup)
-    f->ctxup(f->ctx, buf, len);
+  if (len && f->ctxup) {
+    if (f->comp == CFILE_COMP_BZ) {
+        rpmMD5DecompressUpdate(f->ctx, buf, len);
+    } else {
+        f->ctxup(f->ctx, buf, len);
+    }
+  }
+
   f->bytes += len;
   return len;
 }
@@ -253,7 +259,7 @@ crread_bz(struct cfile *f, void *buf, int len)
         return -1;
       used -= f->strm.bz.avail_in;
       if (used && f->ctxup)
-	f->ctxup(f->ctx, (unsigned char *)(f->strm.bz.next_in - used), used);
+        rpmMD5DecompressUpdate(f->ctx, (unsigned char *)(f->strm.bz.next_in - used), used);
       f->bytes += used;
       if (ret == BZ_STREAM_END)
         {
@@ -399,7 +405,7 @@ crread_gz(struct cfile *f, void *buf, int len)
         return -1;
       used -= f->strm.gz.avail_in;
       if (used && f->ctxup)
-	f->ctxup(f->ctx, f->strm.gz.next_in - used, used);
+        rpmMD5InflateUpdate(f->ctx, f->strm.gz.next_in - used, used);
       f->bytes += used;
       if (ret == Z_STREAM_END)
         {
@@ -407,7 +413,7 @@ crread_gz(struct cfile *f, void *buf, int len)
 	  /* read 8 bytes trailer (crc plus len) */
 	  if (f->strm.gz.avail_in < 8) {
 	    if (f->strm.gz.avail_in && f->ctxup)
-	      f->ctxup(f->ctx, f->strm.gz.next_in, f->strm.gz.avail_in);
+	      rpmMD5InflateUpdate(f->ctx, f->strm.gz.next_in, f->strm.gz.avail_in);
 	    f->bytes += f->strm.gz.avail_in;
 	    /* make trailer available in f->buf */
 	    if (f->strm.gz.avail_in && f->buf != f->strm.gz.next_in)
@@ -423,7 +429,7 @@ crread_gz(struct cfile *f, void *buf, int len)
 	    used = 8;
 	  }
 	  if (f->ctxup)
-	    f->ctxup(f->ctx, f->strm.gz.next_in - used, used);
+	    rpmMD5InflateUpdate(f->ctx, f->strm.gz.next_in - used, used);
 	  /* make trailer available in f->buf */
 	  if (f->strm.gz.next_in != f->buf + 8)
 	    memmove(f->buf + 8 - used, f->strm.gz.next_in - used, used);

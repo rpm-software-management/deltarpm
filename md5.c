@@ -2,6 +2,8 @@
 #include <sys/types.h>
 #include <stdlib.h>
 #include <string.h>
+#include <bzlib.h>
+#include <zlib.h>
 #include "md5.h"
 
 static void rpmMD5Transform(uint32 buf[4], uint32 const in[16]);
@@ -114,6 +116,85 @@ void rpmMD5Update(struct MD5Context *ctx, unsigned char const *buf, unsigned len
     /* Handle any remaining bytes of data. */
 
     memcpy(ctx->in, buf, len);
+}
+
+/*
+ * Decompress (BZIP) the data, then update context as per usual.
+ */
+void rpmMD5DecompressUpdate(struct MD5Context *ctx, unsigned char const *buf, unsigned len)
+{
+    int ret, used;
+
+    bz_stream addbz2strm;
+    addbz2strm.bzalloc = NULL;
+    addbz2strm.bzfree = NULL;
+    addbz2strm.opaque = NULL;
+    addbz2strm.next_in = buf;
+    addbz2strm.avail_in = len;
+
+    if (BZ2_bzDecompressInit(&addbz2strm, 0, 0) != BZ_OK)
+    {
+      fprintf(stderr, "MD5Update: BZ2_bzDecompressInit error\n");
+      exit(1);
+    }
+
+    do {
+      unsigned char *out = (char*)xmalloc(len);
+      addbz2strm.next_out = out;
+      addbz2strm.avail_out = sizeof(out);
+
+      used = addbz2strm.avail_out;
+      ret = BZ2_bzDecompress(&addbz2strm);
+      used -= addbz2strm.avail_out;
+
+      rpmMD5Update(ctx, out, used);
+      xfree(out);
+
+      if (ret == BZ_STREAM_END) {
+        break;
+      }
+    } while (addbz2strm.avail_out == 0);
+
+    BZ2_bzDecompressEnd(&addbz2strm);
+}
+
+/*
+ * Inflate (GZIP) data in buf, then update context as per usual.
+ */
+void rpmMD5InflateUpdate(struct MD5Context *ctx, unsigned char const *buf, unsigned len)
+{
+    int ret, used;
+    z_stream addgzstrm;
+    addgzstrm.zalloc = NULL;
+    addgzstrm.zfree = NULL;
+    addgzstrm.opaque = NULL;
+    addgzstrm.next_in = buf;
+    addgzstrm.avail_in = len;
+
+    if (inflateInit2(&addgzstrm, -MAX_WBITS) != Z_OK)
+      {
+        fprintf(stderr, "addblk: inflateInit2 error\n");
+        exit(1);
+      }
+
+    do {
+      unsigned char *out = (char*)xmalloc(len);
+      addgzstrm.next_out = out;
+      addgzstrm.avail_out = sizeof(out);
+
+      used = addgzstrm.avail_out;
+      ret = inflate(&addgzstrm, Z_NO_FLUSH);
+      used -= addgzstrm.avail_out;
+
+      rpmMD5Update(ctx, out, used);
+      xfree(out);
+
+      if (ret == Z_STREAM_END) {
+        break;
+      }
+    } while (addgzstrm.avail_out == 0);
+
+    inflateEnd(&addgzstrm);
 }
 
 /*
