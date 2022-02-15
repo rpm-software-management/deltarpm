@@ -227,7 +227,7 @@ static unsigned int buzhash(unsigned char *buf)
   unsigned int x = 0x83d31df4U;
   int i;
   for (i = HSIZE; i != 0; i--)
-    x = (x << 1) ^ (x & (1 << 31) ? 1 : 0) ^ noise[*buf++];
+    x = (x << 1) ^ (x & (1u << 31) ? 1 : 0) ^ noise[*buf++];
   return x;
 }
 
@@ -335,7 +335,7 @@ static bsuint hash_findnext(void *data, unsigned char *old, bsuint oldlen, unsig
 scannext:
 	  if (llen >= 32 && scan - lscan >= HSIZE)
 	    goto gotit;
-	  ssx = (ssx << 1) ^ (ssx & (1 << 31) ? 1 : 0) ^ noise[new[scan + HSIZE]];
+	  ssx = (ssx << 1) ^ (ssx & (1u << 31) ? 1 : 0) ^ noise[new[scan + HSIZE]];
 	  oldc = noise[new[scan]] ^ (0x83d31df4U ^ 0x07a63be9U);
 #if HSIZE % 32 != 0
 	  ssx ^= (oldc << (HSIZE % 32)) ^ (oldc >> (32 - (HSIZE % 32)));
