@@ -288,6 +288,11 @@ rpmoffs(FILE *fp, char *isoname, struct rpmpay **retp)
 		{
 		  rpmbalen += 0x800 * 4;
 		  rpmb = realloc(rpmb, rpmbalen);
+		  if (!rpmb)
+		    {
+		      fprintf(stderr, "out of memory\n");
+		      exit(1);
+		    }
 		}
 	      readblk(fp, rpmb + rpmblen, filepos2++);
 	      rpmblen += 0x800;
@@ -312,6 +317,11 @@ rpmoffs(FILE *fp, char *isoname, struct rpmpay **retp)
 		{
 		  rpmbalen += 0x800 * 4;
 		  rpmb = realloc(rpmb, rpmbalen);
+		  if (!rpmb)
+		    {
+		      fprintf(stderr, "out of memory\n");
+		      exit(1);
+		    }
 		}
 	      readblk(fp, rpmb + rpmblen, filepos2++);
 	      rpmblen += 0x800;
