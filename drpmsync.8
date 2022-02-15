@@ -105,7 +105,7 @@ update from.
 Configures whether drpmsync should request that the full rpm is
 always sent along with the delta. Only makes sense if you have a
 fast network connection so that applydeltarpm takes longer than
-transmitting the ful rpm.
+transmitting the full rpm.
 .sp
 .ne 3
 .B deltarpmpath:
@@ -117,7 +117,7 @@ The default is to search the
 variable.
 
 .SH SERVER MODE
-Drpmsync can wither work as CGI script or as a standalone server.
+Drpmsync can either work as CGI script or as a standalone server.
 CGI script mode is automatically selected if the
 .B REQUEST_METHOD
 environment variable is set. In this mode drpmsync expects the
@@ -179,7 +179,7 @@ Specifies the path of a logfile.
 .BR true|false
 .PP
 If this setting is true the server does not combine deltarpms.
-This increases to amount of data that has to be transferred but
+This increases the amount of data that has to be transferred but
 reduces the processor load on the server.
 .sp
 .ne 3

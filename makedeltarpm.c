@@ -1233,7 +1233,7 @@ main(int argc, char **argv)
 	      if (size != filesizes[i])
 		{
 		  if (verbose > 1)
-		    fprintf(vfp, "skipping %s: size missmatch\n", np);
+		    fprintf(vfp, "skipping %s: size mismatch\n", np);
 		  skipped_badsize++;
 		}
 	      else if ((fileflags[i] & (FILE_CONFIG|FILE_MISSINGOK|FILE_GHOST)) != 0)

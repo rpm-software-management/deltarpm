@@ -12,7 +12,7 @@ A) Programs
 
     Options:
       -V: create a specific version, default is V3
-      -s: write sequence info into file (usefull for creating
+      -s: write sequence info into file (useful for creating
 	  yast patchfiles)
 
     applydeltarpm [-v] [-p] [-c] [-C] [-r oldrpm] deltarpm newrpm
@@ -96,7 +96,7 @@ standard deltarpms:
     4 bytes seqlength (always 16 if header included in diff)
     x bytes sequence, containing
             16 bytes seq md5sum
-            x bytes compressed seqence
+            x bytes compressed sequence
             (the sequence defines which files get included from the rpm
              filelist in which order)
                

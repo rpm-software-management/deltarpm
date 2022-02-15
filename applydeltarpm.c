@@ -848,7 +848,7 @@ fillblock_rpm(struct blk *b, int id, struct seqdescr *sdesc, int nsdesc, struct 
 }
 
 
-/* construct the block "id". Note that the tupel (idx, id) will
+/* construct the block "id". Note that the tuple (idx, id) will
  * only get bigger, so we use this to recycly no longer needed
  * blocks */
 

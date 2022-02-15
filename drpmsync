@@ -2486,7 +2486,7 @@ sub rsync_get_syncfiles {
     last if $buf eq "\@RSYNCD: OK";
     die("$buf\n") if $buf =~ /^\@ERROR/s;
     if ($buf =~ /^\@RSYNCD: AUTHREQD /) {
-      die("'$module' needs authentification, but Digest::MD4 is not installed\n") unless $have_md4;
+      die("'$module' needs authentication, but Digest::MD4 is not installed\n") unless $have_md4;
       $user = "nobody" if !defined($user) || $user eq '';
       $password = '' unless defined $password;
       my $digest = "$user ".Digest::MD4::md4_base64("\0\0\0\0$password".substr($buf, 18))."\n";
