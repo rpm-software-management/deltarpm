@@ -255,14 +255,14 @@ static void *hash_create(unsigned char *buf, bsuint len)
   unsigned int prime;
   unsigned int num;
 
-  hd = malloc(sizeof(*hd));
-  if (!hd)
-    return 0;
 #ifdef BSDIFF_64BIT
   /* this is a 16GB limit for HSIZESHIFT == 4 */
   if (len >= (bsuint)(0xffffffff / 4) << HSIZESHIFT)
     return 0;
 #endif
+  hd = malloc(sizeof(*hd));
+  if (!hd)
+    return 0;
   num = (len + HSIZE - 1) >> HSIZESHIFT;
   prime = num * 4;
   for (s = 0; s < sizeof(primes)/sizeof(*primes) - 1; s++)
