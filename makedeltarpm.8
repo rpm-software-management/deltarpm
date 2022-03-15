@@ -73,7 +73,7 @@ option to specify the rpm-print of
 .I oldrpm
 and the created
 patch rpm. This option tells makedeltarpm to exclude the files that
-were not included in the patch rpm but are not byteswise identical
+were not included in the patch rpm but are not bytewise identical
 to the ones in oldrpm.
 .PP
 makedeltarpm can also create an "identity" deltarpm by adding the
@@ -88,7 +88,7 @@ of the rpm's uncompressed payload. You can use the
 .B -m
 option to enable a sliding block algorithm that needs
 .IR mbytes
-megabytes of memory. This trades memory usage with the size of
+megabytes of memory. This trades memory usage for the size of
 the created deltarpm. Furthermore, the uncompressed deltarpm
 payload is currently also stored in memory when this option is
 used, but it tends to be small in most cases.
