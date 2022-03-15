@@ -1575,7 +1575,7 @@ main(int argc, char **argv)
 	  exit(1);
 	}
       rpmMD5Update(&wrmd5, d.h->intro, 16);
-      strncpy((char *)d.h->dp + d.payformatoff, "cpio", 4);
+      memcpy((char *)d.h->dp + d.payformatoff, "cpio", 4);
       if (fwrite(d.h->data, 16 * d.h->cnt + d.h->dcnt, 1, ofp) != 1)
 	{
 	  fprintf(stderr, "write error\n");

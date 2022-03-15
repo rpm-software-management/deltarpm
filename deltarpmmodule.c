@@ -45,7 +45,7 @@ PyObject *createDict(struct deltarpm d)
   /* Sequence */
   if (d.seq) {
     char *tmp = calloc(d.seql * 2 + 1, sizeof(char));
-    int i;
+    unsigned int i;
 
     if(tmp == NULL) {
       PyErr_SetFromErrno(PyExc_SystemError);
