@@ -1449,8 +1449,10 @@ main(int argc, char **argv)
   if (strcmp(fnevr, (char *)d.nevr) != 0)
     {
       fprintf(stderr, "delta rpm made for %s, not %s\n", d.nevr, fnevr);
+      free(fnevr);
       exit(1);
     }
+  free(fnevr);
   if (!seqmatches)
     {
       fprintf(stderr, "rpm does not match the one used for creating the deltarpm\n");
