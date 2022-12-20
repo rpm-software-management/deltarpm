@@ -40,7 +40,7 @@ fragiso: fragiso.o util.o md5.o rpmhead.o cfile.o $(zlibbundled)
 _deltarpmmodule.so: readdeltarpm.o rpmhead.o util.o md5.o cfile.o $(zlibbundled)
 	for PY in $(PYTHONS) ; do \
 		if [ -x /usr/bin/$$PY-config ] && [ -x /usr/bin/$$PY ]; then \
-			PYVER=`$$PY -c 'from distutils import sysconfig ; print(sysconfig.get_python_version())'`; \
+			PYVER=`$$PY -c 'import sysconfig ; print(sysconfig.get_python_version())'`; \
 			PYCFLAGS=`$$PY-config --cflags`; \
 			if [ ! -f "python$$PYVER/$@" ]; then \
 				mkdir -p python$$PYVER ;\
@@ -78,8 +78,8 @@ install:
 	install -m 644 drpmsync.8 $(DESTDIR)$(mandir)/man8
 	for PY in $(PYTHONS) ; do \
 		if [ -x /usr/bin/$$PY ]; then \
-                        PYLIB=`$$PY -c 'from distutils import sysconfig ; print(sysconfig.get_python_lib(1))'` ; \
-			PYVER=`$$PY -c 'from distutils import sysconfig ; print(sysconfig.get_python_version())'` ; \
+                        PYLIB=`$$PY -c 'import sysconfig ; print(sysconfig.get_path("platlib"))'` ; \
+			PYVER=`$$PY -c 'import sysconfig ; print(sysconfig.get_python_version())'` ; \
 			if [ -e python$$PYVER/_deltarpmmodule.so ]; then \
 				mkdir -p $(DESTDIR)$(pylibprefix)$$PYLIB ; \
 				install -m 755 python$$PYVER/_deltarpmmodule.so $(DESTDIR)$(pylibprefix)$$PYLIB ; \
