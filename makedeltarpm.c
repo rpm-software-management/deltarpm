@@ -1104,6 +1104,7 @@ main(int argc, char **argv)
 
   if (stream)
     {
+      FILE *indatafp;
       memset(&sd, 0, sizeof(sd));
       sd.xnewdata = newcpio;
       sd.xnewdatal = newcpiolen;
@@ -1113,7 +1114,12 @@ main(int argc, char **argv)
       sd.new = xmalloc(sd.bsize);
       if (addblkcomp != -1)
         sd.cfa = cfile_open(CFILE_OPEN_WR, CFILE_IO_ALLOC, &d.addblk, addblkcomp, CFILE_LEN_UNLIMITED, 0, 0);
-      sd.cfi = cfile_open(CFILE_OPEN_WR, CFILE_IO_ALLOC, &d.indata, CFILE_COMP_UN, CFILE_LEN_UNLIMITED, 0, 0);
+      if (!(indatafp = tmpfile()))
+	{
+	  fprintf(stderr, "indata tmpfile open failed\n");
+	  exit(1);
+	}
+      sd.cfi = cfile_open(CFILE_OPEN_WR, CFILE_IO_FILE, indatafp, CFILE_COMP_UN, CFILE_LEN_UNLIMITED, 0, 0);
       oldcpio = (void *)&sd;
       oldcpiolen = 0;
       sd.stepd = mkdiff_step_setup(DELTAMODE_HASH | (addblkcomp == -1 ? DELTAMODE_NOADDBLK : 0));
@@ -1439,7 +1445,19 @@ oaretry1:
       addtocpio(&oldcpio, &oldcpiolen, 0, 0);
       if (sd.cfa)
         d.addblklen = sd.cfa->close(sd.cfa);
-      d.inlen = sd.cfi->close(sd.cfi);
+      if (fflush(sd.cfi->fp))
+	{
+	  fprintf(stderr, "indata tmpfile flush failed\n");
+	  exit(1);
+	}
+      d.inlen = ftello(sd.cfi->fp);
+      rewind(sd.cfi->fp);
+      d.indata_cf = cfile_open(CFILE_OPEN_RD, CFILE_IO_REOPEN, sd.cfi, CFILE_COMP_UN, CFILE_LEN_UNLIMITED, 0, 0);
+      if (!d.indata_cf)
+	{
+	  fprintf(stderr, "indata tmpfile reopen failed\n");
+	  exit(1);
+	}
       sd.cfa = 0;
       sd.cfi = 0;
       instr = sd.instr;
@@ -1558,6 +1576,12 @@ oaretry1:
   sd.new = xfree(sd.new);
   offadjs = xfree(offadjs);
   d.targetnevr = xfree(d.targetnevr);
+  if (d.indata_cf)
+    {
+      fclose(d.indata_cf->fp);
+      d.indata_cf->fp = 0;
+      d.indata_cf->close(d.indata_cf);
+    }
   exit(0);
 }
 

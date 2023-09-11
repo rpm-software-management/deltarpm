@@ -119,6 +119,7 @@ writedeltarpm(struct deltarpm *d, unsigned char **indatalist)
 	  exit(1);
 	}
       rpmMD5Update(&paymd5, d->h->intro, 16);
+      memset(oldpayformat, 0, sizeof(oldpayformat));
       if (d->payformatoff)
 	{
 	  memcpy(oldpayformat, d->h->dp + d->payformatoff, 4);
@@ -273,6 +274,20 @@ writedeltarpm(struct deltarpm *d, unsigned char **indatalist)
 	        fprintf(stderr, "data write failed\n");
 	        exit(1);
 	      }
+	}
+      else if (!d->indata && d->indata_cf)
+	{
+	  size_t oldbytes = d->indata_cf->bytes;
+	  if (cfile_copy(d->indata_cf, bfd, 0) == -1)
+	    {
+	      fprintf(stderr, "data write failed\n");
+	      exit(1);
+	    }
+	  if (d->indata_cf->bytes - oldbytes != d->inlen)
+	    {
+	      fprintf(stderr, "data write did not write the correct number of bytes\n");
+	      exit(1);
+	    }
 	}
       else if (bfd->write(bfd, d->indata, d->inlen) != d->inlen)
 	{

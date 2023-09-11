@@ -69,6 +69,7 @@ struct deltarpm {
   unsigned char *addblk;
   drpmuint     inlen;
   unsigned char *indata;
+  struct cfile *indata_cf;
 
   unsigned int compheadlen;
   unsigned int *offadjs;
