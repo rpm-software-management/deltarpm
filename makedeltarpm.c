@@ -669,7 +669,7 @@ main(int argc, char **argv)
   unsigned int *fileflags, *filemodes, *filerdevs, *filesizes, *fileverify, *filecolors;
   int digestalgo = 1;
   unsigned int *digestalgoarray;
-  int i, l, l2, l3;
+  int i;
   int fd, nfd;
   struct cfile *bfd;
   struct cpiophys cph;
@@ -905,6 +905,7 @@ main(int argc, char **argv)
   if (alone && rpmonly)
     {
       /* this mode just updates the lead and signatures, no need to do a real diff */
+      int l;
       if (verbose)
 	fprintf(vfp, "reading rpm header...\n");
       rpmMD5Init(&fullmd5);
@@ -1126,6 +1127,7 @@ main(int argc, char **argv)
     }
   else
     {
+      int l;
       while ((l = newbz->read(newbz, buf, sizeof(buf))) > 0)
 	addtocpio(&newcpio, &newcpiolen, (unsigned char *)buf, l);
       if (l < 0)
@@ -1159,6 +1161,7 @@ main(int argc, char **argv)
     fprintf(vfp, "reading old rpm...\n");
   if (rpmonly)
     {
+      int l;
       while ((l = bfd->read(bfd, buf, sizeof(buf))) > 0)
 	addtocpio(&oldcpio, &oldcpiolen, (unsigned char *)buf, l);
     }
@@ -1180,7 +1183,7 @@ main(int argc, char **argv)
 	  cpiopos += sizeof(cph);
 	  if (memcmp(cph.magic, "070701", 6))
 	    {
-	      fprintf(stderr, "bad cpio archive in old deltarpm\n");
+	      fprintf(stderr, "bad cpio archive entry in old rpm\n");
 		if (verbose >= 2)
 		  {
 		    fprintf(stderr, "cph.magic: %02x%02x %02x%02x %02x%02x\n", cph.magic[0], cph.magic[1], cph.magic[2], cph.magic[3], cph.magic[4], cph.magic[5]);
@@ -1293,8 +1296,6 @@ main(int argc, char **argv)
 	      hsize += S_ISREG(filemodes[i]) ? filesizes[i] : S_ISLNK(filemodes[i]) ? strlen(filelinktos[i]) : 0;
 	      hsize += (4 - (hsize & 3)) & 3;
 	    }
-	  l = nsize + size;
-	  l += (4 - (l & 3)) & 3;
 
 	  if (!skip)
 	    {
@@ -1378,31 +1379,34 @@ oaretry1:
 	    }
 	  else
 	    skipped_all++;
-	  l = l2 = size;
-	  while (l > 0)
+	  if (size)
 	    {
-	      l3 = l > sizeof(buf) ? sizeof(buf) : l;
-	      if (bfd->read(bfd, buf, l3) != l3)
+	      unsigned int l = size;
+	      while (l > 0)
 		{
-		  fprintf(stderr, "payload read failed (data)\n");
-		  exit(1);
+		  unsigned int l2 = l > sizeof(buf) ? sizeof(buf) : l;
+		  if (bfd->read(bfd, buf, (int)l2) != (int)l2)
+		    {
+		      fprintf(stderr, "payload read failed (data)\n");
+		      exit(1);
+		    }
+		  cpiopos += l2;
+		  if (!skip)
+		    addtocpio(&oldcpio, &oldcpiolen, (unsigned char *)buf, l2);
+		  l -= l2;
 		}
-	      cpiopos += l3;
-	      if (!skip)
-		addtocpio(&oldcpio, &oldcpiolen, (unsigned char *)buf, l3);
-	      l -= l3;
-	    }
-	  if ((l2 & 3) != 0)
-	    {
-	      l2 = 4 - (l2 & 3);
-	      if (bfd->read(bfd, buf, l2) != l2)
+	      if ((size & 3) != 0)
 		{
-		  fprintf(stderr, "payload read failed (pad)\n");
-		  exit(1);
+		  unsigned int l2 = 4 - (size & 3);
+		  if (bfd->read(bfd, buf, (int)l2) != (int)l2)
+		    {
+		      fprintf(stderr, "payload read failed (pad)\n");
+		      exit(1);
+		    }
+		  cpiopos += l2;
+		  if (!skip)
+		    addtocpio(&oldcpio, &oldcpiolen, (unsigned char *)"\0\0\0", l2);
 		}
-	      cpiopos += l2;
-	      if (!skip)
-		addtocpio(&oldcpio, &oldcpiolen, (unsigned char *)"\0\0\0", l2);
 	    }
 	}
       namebuf = xfree(namebuf);
