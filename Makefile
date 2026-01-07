@@ -44,7 +44,7 @@ _deltarpmmodule.so: readdeltarpm.o rpmhead.o util.o md5.o cfile.o $(zlibbundled)
 			PYCFLAGS=`$$PY-config --cflags`; \
 			if [ ! -f "python$$PYVER/$@" ]; then \
 				mkdir -p python$$PYVER ;\
-				$(CC) $(CFLAGS) $$PYCFLAGS $(zlibcppflags) -fPIC -c -o python$$PYVER/deltarpmmodule.o deltarpmmodule.c ;\
+				$(CC) $(CPPFLAGS) $(CFLAGS) $$PYCFLAGS $(zlibcppflags) -fPIC -c -o python$$PYVER/deltarpmmodule.o deltarpmmodule.c ;\
 				$(CC) $(LDFLAGS) -o python$$PYVER/$@ python$$PYVER/deltarpmmodule.o $^ -shared -Wl,-soname,_deltarpmmodule.so $(LDLIBS); \
 			fi; \
 		fi; \
