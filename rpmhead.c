@@ -43,6 +43,11 @@ readhead(int fd, int pad)
     }
   cnt  = intro[8] << 24  | intro[9] << 16  | intro[10] << 8 | intro[11];
   dcnt = intro[12] << 24 | intro[13] << 16 | intro[14] << 8 | intro[15];
+  if (cnt < 0 || dcnt < 0 || cnt >= 0x10000 || dcnt >= 0x10000000)
+    {
+      fprintf(stderr, "oversized header\n");
+      return 0;
+    }
   if ((dcnt & 7) && pad)
     dcnt += 8 - (dcnt & 7);
   h = xmalloc(sizeof(*h) + cnt * 16 + dcnt);
@@ -77,6 +82,11 @@ readhead_buf(unsigned char *buf, int len, int pad)
     }
   cnt  = buf[8] << 24  | buf[9] << 16  | buf[10] << 8 | buf[11];
   dcnt = buf[12] << 24 | buf[13] << 16 | buf[14] << 8 | buf[15];
+  if (cnt < 0 || dcnt < 0 || cnt >= 0x10000 || dcnt >= 0x10000000)
+    {
+      fprintf(stderr, "oversized header\n");
+      return 0;
+    }
   if ((dcnt & 7) && pad)
     dcnt += 8 - (dcnt & 7);
   if (len < 16 + cnt * 16 + dcnt)
@@ -113,7 +123,7 @@ headint32(struct rpmhead *h, int tag, int *cnt)
     return 0;
   o = d[8] << 24 | d[9] << 16 | d[10] << 8 | d[11];
   i = d[12] << 24 | d[13] << 16 | d[14] << 8 | d[15];
-  if (o + 4 * i > h->dcnt)
+  if (o > h->dcnt || i > h->dcnt || o + 4 * i > h->dcnt)
     return 0;
   d = h->dp + o;
   r = xmalloc2(i ? i : 1, sizeof(unsigned int));
@@ -144,7 +154,7 @@ headint16(struct rpmhead *h, int tag, int *cnt)
     return 0;
   o = d[8] << 24 | d[9] << 16 | d[10] << 8 | d[11];
   i = d[12] << 24 | d[13] << 16 | d[14] << 8 | d[15];
-  if (o + 2 * i > h->dcnt)
+  if (o > h->dcnt || i > h->dcnt || o + 2 * i > h->dcnt)
     return 0;
   d = h->dp + o;
   r = xmalloc2(i ? i : 1, sizeof(unsigned int));
@@ -173,6 +183,8 @@ headstring(struct rpmhead *h, int tag)
   if (d[4] != 0 || d[5] != 0 || d[6] != 0 || d[7] != 6)
     return 0;
   o = d[8] << 24 | d[9] << 16 | d[10] << 8 | d[11];
+  if (o >= h->dcnt)
+    return 0;
   return (char *)h->dp + o;
 }
 
@@ -236,6 +248,8 @@ headbin(struct rpmhead *h, int tag, int len)
   if (len != i)
     return 0;
   o = d[8] << 24 | d[9] << 16 | d[10] << 8 | d[11];
+  if (o > h->dcnt || i > h->dcnt || o + i > h->dcnt)
+    return 0;
   return (unsigned char *)h->dp + o;
 }
 

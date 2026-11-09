@@ -390,7 +390,7 @@ rpmoffs(FILE *fp, char *isoname, struct rpmpay **retp)
 		  if ((nmf & 1) == 0)
 		    namel = 0;
 		  nmf = ep[4];
-		  if (namel + nml + 2 >= sizeof(name))
+		  if (nml < 0 || namel + nml + 2 >= sizeof(name))
 		    {
 		      fprintf(stderr, "name overflow\n");
 		      exit(1);

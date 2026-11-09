@@ -257,6 +257,11 @@ readdeltarpm(char *n, struct deltarpm *d, struct cfile **cfp)
 	  exit(1);
 	}
       nevrl = (d->rpmlead[8] << 24) | (d->rpmlead[9] << 16) | (d->rpmlead[10] << 8) | d->rpmlead[11];
+      if (nevrl >= 0x10000000)
+        {
+	  fprintf(stderr, "%s: bad nevr length\n", n);
+	  exit(1);
+        }
       d->targetnevr = xmalloc(nevrl + 4);	/* also room for 4 bytes addblklen */
       if (xread(dfd, d->targetnevr, nevrl + 4) != nevrl + 4)
 	{
@@ -339,6 +344,11 @@ readdeltarpm(char *n, struct deltarpm *d, struct cfile **cfp)
       exit(1);
     }
   nevrl = bzread4(bfp);
+  if (nevrl >= 0x10000000)
+    {
+      fprintf(stderr, "%s: bad nevr length\n", n);
+      exit(1);
+    }
   d->nevr = xmalloc(nevrl + 1);
   d->nevr[nevrl] = 0;
   if (bfp->read(bfp, d->nevr, nevrl) != nevrl)
